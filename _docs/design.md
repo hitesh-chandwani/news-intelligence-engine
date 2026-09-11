@@ -1,8 +1,8 @@
 # Technical Design — Event-Driven Intelligence & Notification System
 
 **Companion to:** `plan.md` (product requirements)
-**Stack:** Option A — Python monolith + PostgreSQL/pgvector
-**Status:** Draft for review. Section 18 lists decisions still open.
+**Stack:** Python monolith + PostgreSQL/pgvector + Free-Tier LLM (Google Gemini 2.0 Flash / OpenAI-compatible) + Local FastEmbed
+**Status:** Approved for 100% Free / Zero-Cost MVP Stack.
 
 ---
 
@@ -13,9 +13,9 @@ Build the MVP pipeline described in `plan.md`:
 > **Discover → Identify Event → Understand → Contextualize → Notify**, for the **Silver** commodity, for a single user.
 
 This document covers architecture, data model, the processing pipeline, the LLM
-strategy, the API/UI surface, and the build order. It does **not** commit to a
-discovery data source — discovery is a pluggable adapter and the `web_search`
-tool adapter is wired in later (see §7).
+strategy, the API/UI surface, and the build order. Discovery utilizes free RSS &
+Google News RSS feeds with local extraction (trafilatura), with search adapters
+deferred (see §7).
 
 ---
 
@@ -39,21 +39,21 @@ flowchart TB
         API -->|POST /pipeline/run| PIPE
     end
 
-    subgraph ext["External"]
-        DISC["Discovery providers\n(RSS / web_search / stub)"]
-        EXTRACT["Content extraction\n(web_fetch / trafilatura)"]
-        ANTHROPIC["Anthropic API\n(Opus 5 + Haiku 4.5)"]
-        EMBED["Voyage AI embeddings"]
-        RESEND["Resend (email)"]
+    subgraph ext["External & Local Services"]
+        DISC["Discovery providers\n(Google News RSS / RSS feeds / stub)"]
+        EXTRACT["Content extraction\n(trafilatura - local CPU)"]
+        LLM["LLM (OpenAI-compatible)\n(Google AI Studio: Gemini 2.0 Flash)"]
+        EMBED["FastEmbed (local ONNX bge-small-en-v1.5)"]
+        NOTIF["Notifications\n(Telegram Bot + Resend Email)"]
     end
 
     PG[("PostgreSQL 16\n+ pgvector")]
 
     PIPE --> DISC
     PIPE --> EXTRACT
-    PIPE --> ANTHROPIC
+    PIPE --> LLM
     PIPE --> EMBED
-    PIPE --> RESEND
+    PIPE --> NOTIF
     API --> PG
     PIPE --> PG
 ```
@@ -79,9 +79,11 @@ is mechanical if the product grows.
 | Database | PostgreSQL 16 + `pgvector` | One datastore for relational + vector |
 | Scheduler | APScheduler (`AsyncIOScheduler`) | In-process, no extra infra for MVP |
 | Retries | `tenacity` | Per-stage transient-failure handling |
-| LLM | `anthropic` SDK — Opus 5 (judgment) + Haiku 4.5 (triage) | See §6 |
-| Embeddings | Voyage AI `voyage-3.5` | Anthropic-recommended; avoids a 2nd LLM provider |
-| Email | Resend (`resend` SDK) | Good DX, free tier |
+| LLM | Google AI Studio `gemini-2.5-flash` via OpenAI-compatible endpoint | **100% Free** (15 RPM / 1,500 requests/day free tier); swappable to Groq / DeepSeek / Ollama via `.env`. Scheduled to retire 2026-10-16 — accepted, MVP ships before then; if the build slips, repoint `LLM_MODEL` to the then-current free Flash model |
+| Embeddings | `fastembed` (`BAAI/bge-small-en-v1.5`, 384d) | **100% Free**; runs locally on CPU with ONNX Runtime (~5ms/doc); eliminates paid external embedding API calls |
+| Extraction | `trafilatura` | **100% Free**; state-of-the-art local article body and metadata extraction |
+| Discovery | `feedparser` + RSS & Google News RSS | **100% Free**; no paid search API required for MVP |
+| Notifications | Telegram Bot API + Resend (email) | **100% Free**; Telegram provides instant push alerts on mobile/desktop; Resend free tier (3,000/mo) for email |
 | Config | Pydantic Settings + `.env` | Typed config |
 | Local/dev/deploy | Docker Compose (`db` + `app`) | One command up |
 
@@ -124,7 +126,7 @@ even though the MVP seeds exactly one Watch. Timestamps are `timestamptz`.
 | content | text null | full extracted text |
 | extracted_at | timestamptz null | |
 | entities | jsonb | `["Fresnillo", "Mexico", "solar"]` |
-| embedding | `vector(1024)` null | over title + content summary |
+| embedding | `vector(384)` null | over title + content summary (FastEmbed bge-small-en-v1.5) |
 | status | text | `discovered` \| `extracted` \| `extract_failed` \| `triaged_out` \| `processed` |
 | triage_note | text null | why triage dropped it, if it did |
 
@@ -144,7 +146,7 @@ even though the MVP seeds exactly one Watch. Timestamps are `timestamptz`.
 | impact_reason | text | |
 | impact_confidence | text | `low` \| `medium` \| `high` |
 | entities | jsonb | |
-| embedding | `vector(1024)` | for dedup / relatedness |
+| embedding | `vector(384)` | for dedup / relatedness (FastEmbed bge-small-en-v1.5) |
 | last_material_update_at | timestamptz | bumped only on material change (FR-019) |
 | created_at, updated_at | timestamptz | |
 
@@ -165,7 +167,7 @@ even though the MVP seeds exactly one Watch. Timestamps are `timestamptz`.
 | watch_id | uuid fk unique | one row per watch |
 | min_importance | text | `medium` default |
 | categories | text[] | empty = all categories |
-| channels | text[] | `["email", "inapp"]` |
+| channels | text[] | `["telegram", "email", "inapp"]` |
 
 ### `notification` — FR-020, FR-021, FR-022
 | Column | Type | Notes |
@@ -208,17 +210,17 @@ wraps network calls. Every stage writes counters into `pipeline_run.stats`.
 | # | Stage | Model | FRs | What it does |
 |---|---|---|---|---|
 | 1 | **discover** | — | FR-006, FR-007 | Each enabled `DiscoveryProvider` yields candidate items `{url, title, source_name, published_at, snippet, entities?}`. Drop items whose `url` already exists. Insert new `source` rows, `status=discovered`. |
-| 2 | **extract** | — | FR-007 | For `discovered` sources without content, fetch full text (provider-supplied, else extraction adapter). Set `content`, `extracted_at`, `status=extracted`. Failure → `status=extract_failed` (retried next run, capped). |
-| 3 | **triage** | Haiku 4.5 | FR-012 (cheap pre-filter) | Quick "could this plausibly be a meaningful Silver event?" Drops obvious noise → `status=triaged_out` + `triage_note`. Keeps Opus spend for real candidates. |
-| 4 | **embed** | Voyage | FR-008 | Embed `title + content` (summarised if long). Store `source.embedding`. |
+| 2 | **extract** | — | FR-007 | For `discovered` sources without content, fetch full text using `TrafilaturaExtractor`. Set `content`, `extracted_at`, `status=extracted`. Failure → `status=extract_failed` (retried next run, capped). |
+| 3 | **triage** | Gemini 2.0 Flash | FR-012 (cheap pre-filter) | Quick "could this plausibly be a meaningful Silver event?" Drops obvious noise → `status=triaged_out` + `triage_note`. Keeps deep reasoning calls for real candidates. |
+| 4 | **embed** | FastEmbed | FR-008 | Embed `title + content` using local `bge-small-en-v1.5` on CPU (384-dim). Store `source.embedding`. |
 | 5 | **match** | — | FR-008, FR-009 | pgvector cosine search over `event.embedding` for events within `DEDUP_WINDOW_DAYS`. Produce a candidate set (may be empty). |
-| 6 | **adjudicate** | Opus 5 (structured) | FR-008, FR-009, FR-019 | Given the source + candidate events, decide: `new` \| `existing(event_id)` \| `noise`, plus `materiality: none \| minor \| material`. |
-| 7 | **synthesize** | Opus 5 (structured) | FR-010, FR-011, FR-016 | `new` → build the full event record (title, **fact_summary vs interpretation**, event_date, entities, categories). `existing + material` → update the record and bump `last_material_update_at`. Always link `event_source`. |
-| 8 | **score** | Opus 5 (structured) | FR-012, FR-013, FR-014, FR-015 | Assign `relevance`, `importance`, `impact_{direction,reason,confidence}`. Prompt is fed the retrieved context bundle (see §6). |
-| 9 | **relate** | Opus 5 (structured) | FR-018 | Link to related historical events → `event_relation` rows. |
-| 10 | **notify** | — | FR-019, FR-020–FR-024 | Emit a `notification` iff: run produced a `new` event **or** a `material` update; **and** `relevance != irrelevant`; **and** `importance >= pref.min_importance`; **and** (`pref.categories` empty or event shares one). Render `payload`, send on `pref.channels`, record `channels_sent`. |
+| 6 | **adjudicate** | Gemini 2.0 Flash (structured) | FR-008, FR-009, FR-019 | Given the source + candidate events, decide: `new` \| `existing(event_id)` \| `noise`, plus `materiality: none \| minor \| material`. |
+| 7 | **synthesize** | Gemini 2.0 Flash (structured) | FR-010, FR-011, FR-016 | `new` → build the full event record (title, **fact_summary vs interpretation**, event_date, entities, categories). `existing + material` → update the record and bump `last_material_update_at`. Always link `event_source`. |
+| 8 | **score** | Gemini 2.0 Flash (structured) | FR-012, FR-013, FR-014, FR-015 | Assign `relevance`, `importance`, `impact_{direction,reason,confidence}`. Prompt is fed the retrieved context bundle (see §6). |
+| 9 | **relate** | Gemini 2.0 Flash (structured) | FR-018 | Link to related historical events → `event_relation` rows. |
+| 10 | **notify** | — | FR-019, FR-020–FR-024 | Emit a `notification` iff: run produced a `new` event **or** a `material` update; **and** `relevance != irrelevant`; **and** `importance >= pref.min_importance`; **and** (`pref.categories` empty or event shares one). Render `payload`, send on `pref.channels` (Telegram / email), record `channels_sent`. |
 
-Stages 6–9 can be merged into fewer Opus calls during tuning; they are listed
+Stages 6–9 can be merged into fewer LLM calls during tuning; they are listed
 separately for clarity. `DEDUP_WINDOW_DAYS`, poll interval, and the importance
 threshold are config (§17).
 
@@ -233,32 +235,48 @@ threshold are config (§17).
 
 ## 6. LLM strategy
 
-### Model tiering
-| Use | Model | Note |
-|---|---|---|
-| Triage pre-filter (stage 3) | `claude-haiku-4-5` | High volume, low stakes |
-| Adjudication, synthesis, scoring, relation (6–9) | `claude-opus-5` | Determines whether notifications are any good |
+### OpenAI-Compatible Provider Architecture
+To ensure zero cost and prevent vendor lock-in, the LLM client uses the standard **OpenAI-compatible protocol** (`openai` Python SDK or `httpx`):
+- **Default / Primary Model:** Google AI Studio `gemini-2.5-flash`
+  - Base URL: `https://generativelanguage.googleapis.com/v1beta/openai/`
+  - **Free Tier:** 15 Requests Per Minute (RPM), 1,500 Requests Per Day (RPD), 1M token context.
+  - Zero cost, high speed, top-tier benchmark reasoning.
+  - **Retirement risk:** Google has rotated the free-tier flagship Flash model every 6–8 weeks through 2026; `gemini-2.5-flash` itself is scheduled to retire 2026-10-16. Accepted for this MVP given the build timeline. Because the client speaks the OpenAI-compatible protocol, recovering from an unannounced retirement is a one-line `.env` change (`LLM_MODEL`), not a code change — confirm the current free Flash model ID in Google AI Studio before M3.
+- **Alternative Free / Low-Cost Providers (Swappable via `.env`):**
+  - **Groq:** `llama-3.3-70b-versatile` (generous free tier, ultra-fast).
+  - **DeepSeek:** `deepseek-chat` / V3 (~$0.14/1M tokens).
+  - **Local Ollama:** `http://localhost:11434/v1` (`qwen2.5:14b` or `llama3.2:3b`, 100% offline).
 
-Escalation to a larger model is a config change; downgrading the judgment tier
-should be gated on the eval set (§16).
+### Judgment quality on a small free model
+Unlike a two-tier design, every reasoning stage — including dedup adjudication
+and the relevance/importance/impact scoring that fact/interpretation
+separation depends on (FR-016) — now runs on the same small free model, not
+just triage. This is the part of the pipeline that determines whether
+notifications are worth reading. The eval set in §16 is the guardrail: if it
+shows the free model is unreliable on adjudication or impact reasoning,
+escalate only stages 6–9 to a stronger model (still free/cheap-tier — e.g. a
+Groq 70B model) before shipping, rather than discovering it from bad
+notifications in production.
 
-### Prompt caching
-Every stage-6–9 call shares a large stable prefix, so structure each request as:
-
-- **Cached prefix** (one `cache_control` breakpoint): system instructions +
-  Silver **system** context items + category taxonomy + the scoring rubric
-  (definitions of each relevance/importance/impact level).
-- **Volatile suffix** (after the breakpoint): user context items, a short
-  rolling summary of recent feedback (FR-026), the candidate source/event, and
-  the retrieved historical events.
-
-Verify `usage.cache_read_input_tokens > 0` on the 2nd+ call per run.
+### Rate Limit & Throttle Management
+Because Google AI Studio Free Tier has a 15 RPM limit:
+- The pipeline runner includes an async token bucket rate limiter — spaced at
+  ~5 seconds between LLM calls (not the exact 4s = 15 RPM boundary, so normal
+  jitter doesn't trip 429s), with backoff-and-retry on `429` regardless.
+- Triage pre-filters noise so only viable candidate articles consume LLM calls.
+- Typical hourly run of 15–20 articles uses ~20–40 requests, well inside the 1,500/day limit.
 
 ### Structured outputs
-Use `output_config.format` with an explicit JSON schema for each of:
-`AdjudicationResult`, `EventRecord`, `ScoreResult`, `RelationSet`. No prose
+Use Pydantic models with JSON Schema validation (`response_format={"type": "json_object"}` or schema definition) for each of:
+`AdjudicationResult`, `EventRecord`, `ScoreResult`, `RelationSet`. No loose prose
 parsing. `fact_summary` and `interpretation` are separate required fields in
-`EventRecord` — the schema enforces FR-016.
+`EventRecord` — the schema strictly enforces FR-016.
+
+JSON-schema adherence through the OpenAI-compat shim is less proven than a
+provider's native structured-output path (true of every free-tier provider in
+the swap list, not just Google). Wrap every parse in validate-then-retry: on a
+schema-invalid response, re-ask once with the validation error appended before
+failing the stage — cheap insurance against an occasional malformed response.
 
 ### Context bundle (FR-013)
 The retrieval that feeds stage 8:
@@ -287,17 +305,18 @@ class DiscoveryProvider(Protocol):
 Providers shipped in build order:
 1. **`StubProvider`** — reads `tests/fixtures/sources/*.json`. Lets the whole
    pipeline run offline during development and in CI.
-2. **`RssProvider`** — a curated feed list (config). Free, deterministic, good
-   for the first real end-to-end run.
-3. **`WebSearchProvider`** — Anthropic `web_search` tool (`web_search_20260318`,
-   dynamic filtering, `response_inclusion: "excluded"`, `max_uses` cap, optional
-   `allowed_domains`). **Added at run time**, per decision on 2026-09-10 — the
-   pipeline and everything downstream are built and tested against Stub + RSS
-   first, then this provider is enabled.
+2. **`RssProvider`** — curated industry feeds (Kitco, Mining.com, Reuters) plus
+   **Google News RSS query** (`https://news.google.com/rss/search?q=silver+commodity+mining`).
+   100% Free, deterministic, real-time web discovery without paid search APIs.
+   Note: Google News RSS entries are `news.google.com/rss/articles/...`
+   redirect links, not the publisher URL — resolve the redirect before handing
+   the URL to `TrafilaturaExtractor`. A resolution failure lands in
+   `extract_failed` and is retried next run like any other extraction failure.
+3. **`WebSearchProvider`** — (Optional / Deferred plugin) adapter for external search
+   APIs (e.g. DuckDuckGo / Tavily / Brave) if broader search coverage is needed post-MVP.
 
 `DISCOVERY_PROVIDERS` (config, CSV) selects which are active. Content extraction
-is a sibling adapter (`Extractor` protocol): `WebFetchExtractor` (Anthropic
-`web_fetch`) or `TrafilaturaExtractor` (local). A provider that already returns
+uses `TrafilaturaExtractor` (local CPU, zero cost). A provider that already returns
 `content` skips extraction.
 
 ---
@@ -335,8 +354,11 @@ is a sibling adapter (`Extractor` protocol): `WebFetchExtractor` (Anthropic
   (`fact_summary`), "why it matters" (`interpretation` + importance rationale),
   category, importance, impact + confidence, related historical context (from
   `event_relation`), and the full source list with URLs (FR-022).
-- **Channels:** `email` via Resend (Jinja-rendered), `inapp` = `notification`
-  rows shown in the UI inbox. `pref.channels` selects.
+- **Channels:**
+  - `telegram` via Telegram Bot API (100% free, instant push alert to mobile/desktop).
+  - `email` via Resend (Jinja-rendered HTML, free tier 3,000/mo).
+  - `inapp` = `notification` rows shown in the UI inbox.
+  `pref.channels` selects active channels.
 - **Preferences (FR-023, FR-024):** `min_importance` and `categories` on
   `notification_preference`, editable in the UI.
 
@@ -387,19 +409,20 @@ is a sibling adapter (`Extractor` protocol): `WebFetchExtractor` (Anthropic
 
 | Var | Default | Purpose |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | — | LLM |
-| `DATABASE_URL` | `postgresql+asyncpg://...` | Postgres |
-| `VOYAGE_API_KEY` | — | Embeddings |
-| `RESEND_API_KEY` | — | Email |
-| `NOTIFY_EMAIL_TO` | — | Recipient |
-| `DISCOVERY_PROVIDERS` | `stub` | CSV: `stub`, `rss`, `web_search` |
-| `RSS_FEEDS` | — | CSV of feed URLs (when `rss` active) |
+| `DATABASE_URL` | `postgresql+asyncpg://postgres:postgrespassword@localhost:5432/nie_db` | Postgres connection string |
+| `LLM_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta/openai/` | OpenAI-compatible endpoint (Google AI Studio) |
+| `LLM_API_KEY` | — | Google AI Studio free API key (or Groq/DeepSeek) |
+| `LLM_MODEL` | `gemini-2.5-flash` | Primary model for triage and adjudication (retires 2026-10-16 — verify current free Flash model before M3) |
+| `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | FastEmbed model (runs locally on CPU, 384d) |
+| `TELEGRAM_BOT_TOKEN` | — | Telegram Bot API token (free instant push alerts) |
+| `TELEGRAM_CHAT_ID` | — | Telegram target chat / user ID |
+| `RESEND_API_KEY` | — | Optional: Resend API key for email delivery |
+| `NOTIFY_EMAIL_TO` | — | Optional: Email recipient |
+| `DISCOVERY_PROVIDERS` | `stub,rss` | CSV: `stub`, `rss` |
+| `RSS_FEEDS` | — | CSV of RSS feeds (Google News Silver query + industry feeds) |
 | `POLL_INTERVAL_MINUTES` | `60` | Scheduler cadence |
 | `NOTIFY_MIN_IMPORTANCE` | `medium` | Seed for `notification_preference` |
 | `DEDUP_WINDOW_DAYS` | `14` | Candidate recall window |
-| `LLM_JUDGMENT_MODEL` | `claude-opus-5` | Stages 6–9 |
-| `LLM_TRIAGE_MODEL` | `claude-haiku-4-5` | Stage 3 |
-| `WEB_SEARCH_MAX_USES` | `5` | When `web_search` active |
 
 ---
 
@@ -418,11 +441,11 @@ news-intelligence-engine/
       runner.py  discover.py  extract.py  triage.py  embed.py
       match.py   adjudicate.py  synthesize.py  score.py  relate.py  notify.py
     llm/
-      client.py  caching.py  prompts/
+      client.py  prompts/
     sources/
-      base.py  stub.py  rss.py  web_search.py  extract_webfetch.py  extract_trafilatura.py
-    embeddings/   voyage.py
-    notifications/ email.py  inbox.py
+      base.py  stub.py  rss.py  extract_trafilatura.py
+    embeddings/   fastembed.py
+    notifications/ telegram.py  email.py  inbox.py
     seed/         silver_context.md  categories.py  run.py
   tests/
     fixtures/sources/*.json
@@ -440,8 +463,6 @@ build a small labelled set early:
   expected relevance, expected importance.
 - A pytest target runs stages 3–8 against fixtures and reports agreement.
 - Used to gate any prompt change and any model-tier downgrade.
-
-Optional: Langfuse for request tracing during tuning.
 
 ---
 
@@ -461,17 +482,16 @@ default `notification_preference`.
 
 ---
 
-## 18. Open decisions (need confirmation)
+## 18. Resolved Architecture Decisions (Free MVP)
 
-| # | Decision | Recommendation |
-|---|---|---|
-| 1 | UI approach | FastAPI + Jinja + HTMX (in-monolith, no build) — vs Streamlit / React |
-| 2 | Include the Haiku 4.5 triage pre-filter (stage 3)? | Yes — meaningful Opus-cost saving |
-| 3 | Embeddings provider | Voyage AI `voyage-3.5` — vs OpenAI `text-embedding-3-small` / local `bge` |
-| 4 | MVP notification channels | Email (Resend) + in-app — add Telegram/Slack? |
-| 5 | Auth | None for MVP — single-user, bound to localhost / trusted network |
-| 6 | First real discovery source (before `web_search`) | Curated RSS list — need the initial feed set |
-| 7 | `web_search` variant when added | `web_search_20260318` + dynamic filtering + `response_inclusion: excluded` + `max_uses` cap |
+| # | Decision | Selected Choice | Rationale |
+|---|---|---|---|
+| 1 | UI approach | FastAPI + Jinja + HTMX (in-monolith) | Zero build step, minimal footprint, fast prototyping |
+| 2 | LLM Provider & Model | Google AI Studio (`gemini-2.5-flash`) via OpenAI-compatible endpoint | **100% Free** (1,500 requests/day, 15 RPM). Retires 2026-10-16, accepted given MVP timeline; `.env`-swappable if it slips |
+| 3 | Embeddings provider | `fastembed` (`bge-small-en-v1.5`, 384d) | **100% Free**, runs locally on CPU with ONNX Runtime, no external API latency |
+| 4 | MVP notification channels | Telegram Bot API + Resend (email) + in-app | Telegram is 100% free with instant phone/desktop push; Resend free tier for email |
+| 5 | Auth | None for MVP | Single-user, bound to localhost / trusted network |
+| 6 | Discovery sources | Curated industry RSS + Google News RSS query | Real-time web discovery with 0 API costs |
 
 ---
 
@@ -479,16 +499,16 @@ default `notification_preference`.
 
 | Milestone | Deliverable |
 |---|---|
-| M0 | Repo skeleton, `uv` deps, Docker Compose, config, `GET /health` |
-| M1 | `models.py`, first Alembic migration, seed script (watch + Silver context + categories + prefs) |
-| M2 | Pipeline spine: `pipeline_run` tracking, `runner.py`, `POST /pipeline/run`, `StubProvider` — full chain runs offline with no LLM calls (stages stubbed) |
-| M3 | LLM stages 6–9 with prompt caching + structured outputs; eval fixtures + `make eval` |
-| M4 | pgvector wiring, `embed` + `match` stages, `triage` stage |
-| M5 | Notifications: Resend + in-app inbox, trigger gate, preferences |
+| M0 | Repo skeleton, `uv` deps, Docker Compose (`pgvector`), config, `GET /health` |
+| M1 | `models.py`, first Alembic migration (384d vectors), seed script (watch + context + categories + prefs) |
+| M2 | Pipeline spine: `pipeline_run` tracking, `runner.py`, `POST /pipeline/run`, `StubProvider` |
+| M3 | LLM stages 6–9 using OpenAI-compatible client (`gemini-2.5-flash`, verify still current) + structured outputs + validate/retry wrapper; eval fixtures |
+| M4 | pgvector wiring, `FastEmbed` embeddings + vector match stage, triage stage with rate-limiting |
+| M5 | Notifications: Telegram Bot push + Resend email + in-app inbox |
 | M6 | UI: dashboard, timeline, event detail, context editor, preferences, inbox |
 | M7 | Feedback capture + rolling feedback summary into the context bundle |
-| M8 | `RssProvider` + extraction adapter; first real end-to-end run |
-| M9 | `WebSearchProvider` enabled; APScheduler polling on `POLL_INTERVAL_MINUTES` |
+| M8 | `RssProvider` (Google News RSS query + Kitco/Mining.com) + `TrafilaturaExtractor` |
+| M9 | APScheduler interval automation on `POLL_INTERVAL_MINUTES` |
 
 ---
 
