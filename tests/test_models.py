@@ -1,11 +1,11 @@
-"""Tests for src/nie/models.py (the `Watch` model / `watch` table).
+"""Tests for src/nie/models.py (the `Watch` and `ContextItem` models).
 
 Per _docs/testing-guidelines.md, DB-backed tests run against the real
 Docker Compose Postgres (`docker compose up db`), never mocked. This test
-runs the Alembic migration chain (issues #4, #5) against that live
-database, then exercises `Watch` through the async session factory to
-prove the mapping, unique constraint, and check constraint all work end
-to end.
+runs the Alembic migration chain (issues #4, #5, #6) against that live
+database, then exercises `Watch`/`ContextItem` through the async session
+factory to prove the mapping, unique/check constraints, and foreign key
+all work end to end.
 """
 
 import uuid
@@ -20,7 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nie.db import create_engine, create_session_factory
-from nie.models import Watch
+from nie.models import ContextItem, Watch
 
 REPO_ROOT = Path(__file__).parent.parent
 
@@ -111,4 +111,92 @@ async def test_invalid_status_raises_integrity_error(
     with pytest.raises(IntegrityError):
         async with session_factory() as session:
             session.add(Watch(slug=unique_slug("bogus"), name="Bogus", status="bogus"))
+            await session.commit()
+
+
+async def test_create_and_read_back_context_items(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        watch = Watch(slug=unique_slug("silver"), name="Silver Commodity", status="enabled")
+        session.add(watch)
+        await session.commit()
+        watch_id = watch.id
+
+    async with session_factory() as session:
+        session.add_all(
+            [
+                ContextItem(
+                    watch_id=watch_id,
+                    kind="system",
+                    label="Seeded background",
+                    body="Silver is a precious and industrial metal.",
+                ),
+                ContextItem(
+                    watch_id=watch_id,
+                    kind="user",
+                    label="My note",
+                    body="Watch for ETF inflows.",
+                ),
+            ]
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(ContextItem).where(ContextItem.watch_id == watch_id).order_by(ContextItem.kind)
+        )
+        items = result.scalars().all()
+
+    assert len(items) == 2
+    system_item, user_item = items
+
+    assert system_item.kind == "system"
+    assert system_item.label == "Seeded background"
+    assert system_item.body == "Silver is a precious and industrial metal."
+    assert system_item.created_at is not None
+    assert system_item.updated_at is not None
+
+    assert user_item.kind == "user"
+    assert user_item.label == "My note"
+    assert user_item.body == "Watch for ETF inflows."
+    assert user_item.created_at is not None
+    assert user_item.updated_at is not None
+
+
+async def test_invalid_context_item_kind_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        watch = Watch(slug=unique_slug("silver"), name="Silver Commodity", status="enabled")
+        session.add(watch)
+        await session.commit()
+        watch_id = watch.id
+
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(
+                ContextItem(
+                    watch_id=watch_id,
+                    kind="bogus",
+                    label="Bad kind",
+                    body="Should not be inserted.",
+                )
+            )
+            await session.commit()
+
+
+async def test_context_item_invalid_watch_id_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(
+                ContextItem(
+                    watch_id=uuid.uuid4(),
+                    kind="system",
+                    label="Orphan",
+                    body="No watch references this.",
+                )
+            )
             await session.commit()
