@@ -108,6 +108,84 @@ class Category(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class Event(Base):
+    """An identified event: fact/interpretation split, scoring, entities,
+    and embedding (`design.md` §4, FR-010, FR-012, FR-014, FR-015, FR-016,
+    FR-019), keyed to the `Watch` that surfaced it. The most complex table
+    in the schema so far.
+
+    ``fact_summary`` (observed information only) and ``interpretation``
+    (system interpretation) are kept in schema-separate columns per
+    FR-016. ``relevance``/``importance``/``impact_direction``/
+    ``impact_confidence`` are plain ``text`` + ``CheckConstraint``, same
+    pattern as `Watch.status`/`Source.status`, but -- unlike those -- are
+    nullable: pipeline stage 7 (synthesize, #26) creates the row before
+    stage 8 (score, #28) fills these in, so they start out ``NULL``.
+    Postgres ``IN (...)`` checks pass ``NULL`` through automatically, so no
+    extra ``OR col IS NULL`` clause is needed. ``impact_reason`` is free
+    text with no CheckConstraint (not enum-like).
+
+    ``embedding`` is **not** nullable, unlike `Source.embedding` (#8) --
+    stage 7 builds the full event record (title, fact_summary/
+    interpretation, event_date, entities, embedding) in one shot, with the
+    embedding needed immediately for stage 5's vector match on future runs.
+
+    ``last_material_update_at`` has a ``server_default`` but deliberately
+    **no** ``onupdate`` (unlike ``updated_at``) -- it's set once at insert
+    and only bumped by application code on a material change (FR-019),
+    independent of ``updated_at`` which auto-bumps on every change.
+    """
+
+    __tablename__ = "event"
+    __table_args__ = (
+        CheckConstraint(
+            "relevance IN ('irrelevant', 'low', 'medium', 'high')",
+            name="ck_event_relevance",
+        ),
+        CheckConstraint(
+            "importance IN ('low', 'medium', 'high', 'critical')",
+            name="ck_event_importance",
+        ),
+        CheckConstraint(
+            "impact_direction IN ('bullish', 'bearish', 'neutral', 'unclear')",
+            name="ck_event_impact_direction",
+        ),
+        CheckConstraint(
+            "impact_confidence IN ('low', 'medium', 'high')",
+            name="ck_event_impact_confidence",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    watch_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("watch.id"), nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    fact_summary: Mapped[str] = mapped_column(Text, nullable=False)
+    interpretation: Mapped[str] = mapped_column(Text, nullable=False)
+    event_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    discovered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    relevance: Mapped[str | None] = mapped_column(Text)
+    importance: Mapped[str | None] = mapped_column(Text)
+    impact_direction: Mapped[str | None] = mapped_column(Text)
+    impact_reason: Mapped[str | None] = mapped_column(Text)
+    impact_confidence: Mapped[str | None] = mapped_column(Text)
+    entities: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    embedding: Mapped[list[float]] = mapped_column(Vector(384), nullable=False)
+    last_material_update_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class ContextItem(Base):
     """Background context attached to a `Watch` (`design.md` §4, #6).
 
