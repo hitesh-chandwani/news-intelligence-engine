@@ -246,6 +246,27 @@ class EventRelation(Base):
     rationale: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class EventCategory(Base):
+    """Join table linking an `Event` to the `Category` row(s) it belongs to
+    (`design.md` §4, FR-011).
+
+    A pure join table -- no synthetic `id` column, same composite-primary-
+    key pattern `EventSource`/`EventRelation` established in #10. The
+    composite primary key on `(event_id, category_id)` is what enforces
+    uniqueness of the link; there's no separate `UniqueConstraint`. Rows are
+    inserted by the synthesize pipeline stage (#26), out of scope here.
+    """
+
+    __tablename__ = "event_category"
+
+    event_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("event.id"), primary_key=True, nullable=False
+    )
+    category_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("category.id"), primary_key=True, nullable=False
+    )
+
+
 class ContextItem(Base):
     """Background context attached to a `Watch` (`design.md` §4, #6).
 
