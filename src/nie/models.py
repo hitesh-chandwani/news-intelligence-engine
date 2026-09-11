@@ -186,6 +186,66 @@ class Event(Base):
     )
 
 
+class EventSource(Base):
+    """Join table linking an `Event` back to the `Source` row(s) it was
+    synthesized from (`design.md` §4, FR-009).
+
+    A pure join table -- no synthetic `id` column, per the composite-
+    primary-key precedent set for `EventCategory` in #42. The composite
+    primary key on `(event_id, source_id)` is what enforces that
+    uniqueness; there's no separate `UniqueConstraint`. Rows are inserted
+    by the synthesize pipeline stage (#26), out of scope here.
+    """
+
+    __tablename__ = "event_source"
+
+    event_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("event.id"), primary_key=True, nullable=False
+    )
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("source.id"), primary_key=True, nullable=False
+    )
+    linked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class EventRelation(Base):
+    """How one `Event` relates to another (`design.md` §4, FR-018).
+
+    `relation` is plain `text` + `CheckConstraint`, same pattern as every
+    other status/verdict column in this module. The composite primary key
+    on `(from_event_id, to_event_id, relation)` allows more than one
+    relation type between the same ordered pair of events (e.g. both
+    `precedes` and `context-for` simultaneously) while still blocking an
+    exact duplicate row. `rationale` is `nullable=False` -- the relate
+    pipeline stage (#29) builds the full row in one shot, same reasoning
+    `Event.fact_summary`/`Event.interpretation` used in #9. A
+    `CheckConstraint` rejects `from_event_id == to_event_id`: an event
+    cannot be related to itself.
+    """
+
+    __tablename__ = "event_relation"
+    __table_args__ = (
+        CheckConstraint(
+            "relation IN ('precedes', 'similar', 'escalation-of', 'context-for')",
+            name="ck_event_relation_relation",
+        ),
+        CheckConstraint(
+            "from_event_id != to_event_id", name="ck_event_relation_no_self_relation"
+        ),
+    )
+
+    from_event_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("event.id"), primary_key=True, nullable=False
+    )
+    to_event_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("event.id"), primary_key=True, nullable=False
+    )
+    relation: Mapped[str] = mapped_column(Text, primary_key=True, nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 class ContextItem(Base):
     """Background context attached to a `Watch` (`design.md` §4, #6).
 
