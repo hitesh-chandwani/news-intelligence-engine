@@ -319,7 +319,7 @@ async def test_duplicate_watch_id_url_raises_integrity_error(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     watch_id = await _seeded_watch(session_factory)
-    url = "https://example.com/duplicate-source"
+    url = f"https://example.com/{unique_slug('duplicate-source')}"
 
     async with session_factory() as session:
         session.add(
@@ -354,7 +354,7 @@ async def test_same_url_under_different_watches_succeeds(
 ) -> None:
     watch_id_a = await _seeded_watch(session_factory, "silver")
     watch_id_b = await _seeded_watch(session_factory, "gold")
-    url = "https://example.com/shared-source"
+    url = f"https://example.com/{unique_slug('shared-source')}"
 
     async with session_factory() as session:
         session.add_all(
