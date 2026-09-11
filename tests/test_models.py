@@ -1,12 +1,13 @@
 """Tests for src/nie/models.py (the `Watch`, `ContextItem`, `Category`,
-`Source`, `Event` models).
+`Source`, `Event`, `EventSource`, `EventRelation` models).
 
 Per _docs/testing-guidelines.md, DB-backed tests run against the real
 Docker Compose Postgres (`docker compose up db`), never mocked. This test
-runs the Alembic migration chain (issues #4, #5, #6, #7, #8, #9) against
-that live database, then exercises `Watch`/`ContextItem`/`Category`/
-`Source`/`Event` through the async session factory to prove the mapping,
-unique/check constraints, and foreign key all work end to end.
+runs the Alembic migration chain (issues #4, #5, #6, #7, #8, #9, #10)
+against that live database, then exercises `Watch`/`ContextItem`/
+`Category`/`Source`/`Event`/`EventSource`/`EventRelation` through the
+async session factory to prove the mapping, unique/check constraints,
+and foreign keys all work end to end.
 
 The `Category` tests also exercise `nie.seed.categories.seed_categories`
 directly (#7) -- `category` is a small global lookup table (unlike `watch`,
@@ -36,7 +37,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nie.db import create_engine, create_session_factory
-from nie.models import Category, ContextItem, Event, Source, Watch
+from nie.models import Category, ContextItem, Event, EventRelation, EventSource, Source, Watch
 from nie.seed.categories import CATEGORIES, seed_categories
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -593,5 +594,177 @@ async def test_event_invalid_watch_id_raises_integrity_error(
         async with session_factory() as session:
             session.add(
                 Event(**_event_kwargs(uuid.uuid4(), unique_slug("orphan-event")))
+            )
+            await session.commit()
+
+
+async def _seeded_event(
+    session_factory: async_sessionmaker[AsyncSession], watch_id: uuid.UUID, prefix: str = "event"
+) -> uuid.UUID:
+    """Insert an `Event` with fresh unique-per-run data and return its id."""
+    async with session_factory() as session:
+        event = Event(**_event_kwargs(watch_id, unique_slug(prefix)))
+        session.add(event)
+        await session.commit()
+        return event.id
+
+
+async def _seeded_source(
+    session_factory: async_sessionmaker[AsyncSession], watch_id: uuid.UUID, prefix: str = "source"
+) -> uuid.UUID:
+    """Insert a `Source` with fresh unique-per-run data and return its id."""
+    async with session_factory() as session:
+        source = Source(
+            watch_id=watch_id,
+            url=f"https://example.com/{unique_slug(prefix)}",
+            title="Test source",
+            source_name="Example News",
+            entities={},
+            status="discovered",
+        )
+        session.add(source)
+        await session.commit()
+        return source.id
+
+
+async def test_create_and_read_back_event_sources(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+    event_id = await _seeded_event(session_factory, watch_id)
+    source_id_a = await _seeded_source(session_factory, watch_id, "source-a")
+    source_id_b = await _seeded_source(session_factory, watch_id, "source-b")
+
+    async with session_factory() as session:
+        session.add_all(
+            [
+                EventSource(event_id=event_id, source_id=source_id_a),
+                EventSource(event_id=event_id, source_id=source_id_b),
+            ]
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(EventSource).where(EventSource.event_id == event_id)
+        )
+        links = result.scalars().all()
+
+    assert {link.source_id for link in links} == {source_id_a, source_id_b}
+    assert all(link.linked_at is not None for link in links)
+
+
+async def test_create_and_read_back_event_relation(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+    from_event_id = await _seeded_event(session_factory, watch_id, "from-event")
+    to_event_id = await _seeded_event(session_factory, watch_id, "to-event")
+
+    async with session_factory() as session:
+        session.add(
+            EventRelation(
+                from_event_id=from_event_id,
+                to_event_id=to_event_id,
+                relation="precedes",
+                rationale="The first event's policy shift caused the second event's rally.",
+            )
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(EventRelation).where(EventRelation.from_event_id == from_event_id)
+        )
+        fetched = result.scalar_one()
+
+    assert fetched.to_event_id == to_event_id
+    assert fetched.relation == "precedes"
+    assert fetched.rationale == "The first event's policy shift caused the second event's rally."
+
+
+async def test_duplicate_event_source_pk_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+    event_id = await _seeded_event(session_factory, watch_id)
+    source_id = await _seeded_source(session_factory, watch_id)
+
+    async with session_factory() as session:
+        session.add(EventSource(event_id=event_id, source_id=source_id))
+        await session.commit()
+
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(EventSource(event_id=event_id, source_id=source_id))
+            await session.commit()
+
+
+async def test_invalid_event_relation_value_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+    from_event_id = await _seeded_event(session_factory, watch_id, "from-event")
+    to_event_id = await _seeded_event(session_factory, watch_id, "to-event")
+
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(
+                EventRelation(
+                    from_event_id=from_event_id,
+                    to_event_id=to_event_id,
+                    relation="bogus",
+                    rationale="Not one of the allowed relation values.",
+                )
+            )
+            await session.commit()
+
+
+async def test_event_relation_self_relation_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+    event_id = await _seeded_event(session_factory, watch_id)
+
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(
+                EventRelation(
+                    from_event_id=event_id,
+                    to_event_id=event_id,
+                    relation="similar",
+                    rationale="An event cannot be related to itself.",
+                )
+            )
+            await session.commit()
+
+
+async def test_event_source_orphan_event_id_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+    source_id = await _seeded_source(session_factory, watch_id)
+
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(EventSource(event_id=uuid.uuid4(), source_id=source_id))
+            await session.commit()
+
+
+async def test_event_relation_orphan_from_event_id_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+    to_event_id = await _seeded_event(session_factory, watch_id, "to-event")
+
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(
+                EventRelation(
+                    from_event_id=uuid.uuid4(),
+                    to_event_id=to_event_id,
+                    relation="similar",
+                    rationale="from_event_id does not reference any event.",
+                )
             )
             await session.commit()
