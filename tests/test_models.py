@@ -1,11 +1,12 @@
-"""Tests for src/nie/models.py (the `Watch`, `ContextItem`, `Category` models).
+"""Tests for src/nie/models.py (the `Watch`, `ContextItem`, `Category`,
+`Source` models).
 
 Per _docs/testing-guidelines.md, DB-backed tests run against the real
 Docker Compose Postgres (`docker compose up db`), never mocked. This test
-runs the Alembic migration chain (issues #4, #5, #6, #7) against that live
-database, then exercises `Watch`/`ContextItem`/`Category` through the async
-session factory to prove the mapping, unique/check constraints, and foreign
-key all work end to end.
+runs the Alembic migration chain (issues #4, #5, #6, #7, #8) against that
+live database, then exercises `Watch`/`ContextItem`/`Category`/`Source`
+through the async session factory to prove the mapping, unique/check
+constraints, and foreign key all work end to end.
 
 The `Category` tests also exercise `nie.seed.categories.seed_categories`
 directly (#7) -- `category` is a small global lookup table (unlike `watch`,
@@ -13,10 +14,15 @@ it isn't given a fresh per-test-unique slug), so those tests rely on
 `seed_categories`'s idempotency to keep the table at exactly the 13 seeded
 rows across runs/re-runs, and must not insert any `Category` row with a slug
 outside that fixed set.
+
+The `Source` tests (#8) use a fixed 384-length embedding list to match
+`pgvector.sqlalchemy.Vector(384)` (384 to match fastembed's
+`bge-small-en-v1.5`, `design.md` §3, §6).
 """
 
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -27,7 +33,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nie.db import create_engine, create_session_factory
-from nie.models import Category, ContextItem, Watch
+from nie.models import Category, ContextItem, Source, Watch
 from nie.seed.categories import CATEGORIES, seed_categories
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -251,4 +257,169 @@ async def test_duplicate_category_slug_raises_integrity_error(
     with pytest.raises(IntegrityError):
         async with session_factory() as session:
             session.add(Category(slug=existing_slug, name="Duplicate"))
+            await session.commit()
+
+
+async def _seeded_watch(
+    session_factory: async_sessionmaker[AsyncSession], prefix: str = "silver"
+) -> uuid.UUID:
+    """Insert a `Watch` with a fresh unique slug and return its id."""
+    async with session_factory() as session:
+        watch = Watch(slug=unique_slug(prefix), name="Silver Commodity", status="enabled")
+        session.add(watch)
+        await session.commit()
+        return watch.id
+
+
+async def test_create_and_read_back_source(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+    embedding = [float(i) / 384 for i in range(384)]
+
+    async with session_factory() as session:
+        source = Source(
+            watch_id=watch_id,
+            url="https://example.com/silver-outlook",
+            title="Silver Outlook 2026",
+            source_name="Example News",
+            published_at=datetime(2026, 9, 1, tzinfo=UTC),
+            content="Silver prices rose on ETF inflows.",
+            extracted_at=datetime(2026, 9, 1, 1, tzinfo=UTC),
+            entities={"tickers": ["XAG"], "people": []},
+            embedding=embedding,
+            status="extracted",
+            triage_note="Relevant to silver ETF flows.",
+        )
+        session.add(source)
+        await session.commit()
+        source_id = source.id
+
+    async with session_factory() as session:
+        result = await session.execute(select(Source).where(Source.id == source_id))
+        fetched = result.scalar_one()
+
+    assert fetched.id is not None
+    assert fetched.watch_id == watch_id
+    assert fetched.url == "https://example.com/silver-outlook"
+    assert fetched.title == "Silver Outlook 2026"
+    assert fetched.source_name == "Example News"
+    assert fetched.published_at is not None
+    assert fetched.discovered_at is not None
+    assert fetched.content == "Silver prices rose on ETF inflows."
+    assert fetched.extracted_at is not None
+    assert fetched.entities == {"tickers": ["XAG"], "people": []}
+    assert fetched.embedding is not None
+    assert len(fetched.embedding) == 384
+    assert fetched.status == "extracted"
+    assert fetched.triage_note == "Relevant to silver ETF flows."
+
+
+async def test_duplicate_watch_id_url_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+    url = "https://example.com/duplicate-source"
+
+    async with session_factory() as session:
+        session.add(
+            Source(
+                watch_id=watch_id,
+                url=url,
+                title="First",
+                source_name="Example News",
+                entities={},
+                status="discovered",
+            )
+        )
+        await session.commit()
+
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(
+                Source(
+                    watch_id=watch_id,
+                    url=url,
+                    title="Second",
+                    source_name="Example News",
+                    entities={},
+                    status="discovered",
+                )
+            )
+            await session.commit()
+
+
+async def test_same_url_under_different_watches_succeeds(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id_a = await _seeded_watch(session_factory, "silver")
+    watch_id_b = await _seeded_watch(session_factory, "gold")
+    url = "https://example.com/shared-source"
+
+    async with session_factory() as session:
+        session.add_all(
+            [
+                Source(
+                    watch_id=watch_id_a,
+                    url=url,
+                    title="Silver angle",
+                    source_name="Example News",
+                    entities={},
+                    status="discovered",
+                ),
+                Source(
+                    watch_id=watch_id_b,
+                    url=url,
+                    title="Gold angle",
+                    source_name="Example News",
+                    entities={},
+                    status="discovered",
+                ),
+            ]
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        result = await session.execute(select(Source).where(Source.url == url))
+        sources = result.scalars().all()
+
+    assert len(sources) == 2
+    assert {s.watch_id for s in sources} == {watch_id_a, watch_id_b}
+
+
+async def test_invalid_source_status_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(
+                Source(
+                    watch_id=watch_id,
+                    url="https://example.com/bogus-status",
+                    title="Bogus status",
+                    source_name="Example News",
+                    entities={},
+                    status="bogus",
+                )
+            )
+            await session.commit()
+
+
+async def test_source_invalid_watch_id_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(
+                Source(
+                    watch_id=uuid.uuid4(),
+                    url="https://example.com/orphan-source",
+                    title="Orphan",
+                    source_name="Example News",
+                    entities={},
+                    status="discovered",
+                )
+            )
             await session.commit()
