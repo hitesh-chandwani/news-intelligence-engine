@@ -1,15 +1,18 @@
 """Tests for src/nie/models.py (the `Watch`, `ContextItem`, `Category`,
 `Source`, `Event`, `EventSource`, `EventRelation`, `EventCategory`,
-`NotificationPreference`, `Notification` models).
+`NotificationPreference`, `Notification`, `Feedback` models).
 
 Per _docs/testing-guidelines.md, DB-backed tests run against the real
 Docker Compose Postgres (`docker compose up db`), never mocked. This test
 runs the Alembic migration chain (issues #4, #5, #6, #7, #8, #9, #10, #42,
-#11) against that live database, then exercises `Watch`/`ContextItem`/
+#11, #12) against that live database, then exercises `Watch`/`ContextItem`/
 `Category`/`Source`/`Event`/`EventSource`/`EventRelation`/`EventCategory`/
-`NotificationPreference`/`Notification` through the async session factory
-to prove the mapping, unique/check constraints, and foreign keys all work
-end to end.
+`NotificationPreference`/`Notification`/`Feedback` through the async
+session factory to prove the mapping, unique/check constraints, and
+foreign keys all work end to end.
+
+The `Feedback` tests (#12) use a fresh `_seeded_watch`/`_seeded_event` per
+test, same as the `NotificationPreference`/`Notification` tests above.
 
 The `NotificationPreference`/`Notification` tests (#11) use a fresh
 `_seeded_watch`/`_seeded_event` per test, same as the `Source`/`Event`
@@ -51,6 +54,7 @@ from nie.models import (
     EventCategory,
     EventRelation,
     EventSource,
+    Feedback,
     Notification,
     NotificationPreference,
     Source,
@@ -1024,5 +1028,109 @@ async def test_notification_orphan_event_id_raises_integrity_error(
                     payload={},
                     channels_sent=[],
                 )
+            )
+            await session.commit()
+
+
+FEEDBACK_VERDICTS = [
+    "useful",
+    "not_useful",
+    "too_many_similar",
+    "more_like_this",
+    "less_of_this",
+]
+
+
+async def test_create_and_read_back_feedback_for_every_verdict(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+    event_id = await _seeded_event(session_factory, watch_id)
+
+    async with session_factory() as session:
+        session.add_all(
+            [
+                Feedback(
+                    watch_id=watch_id,
+                    event_id=event_id,
+                    verdict=verdict,
+                    note=f"Note for {verdict}",
+                )
+                for verdict in FEEDBACK_VERDICTS
+            ]
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(Feedback).where(Feedback.event_id == event_id)
+        )
+        rows = result.scalars().all()
+
+    assert len(rows) == len(FEEDBACK_VERDICTS)
+    assert {row.verdict for row in rows} == set(FEEDBACK_VERDICTS)
+    for row in rows:
+        assert row.watch_id == watch_id
+        assert row.event_id == event_id
+        assert row.note == f"Note for {row.verdict}"
+        assert row.created_at is not None
+
+
+async def test_feedback_without_note_round_trips_as_none(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+    event_id = await _seeded_event(session_factory, watch_id)
+
+    async with session_factory() as session:
+        feedback = Feedback(watch_id=watch_id, event_id=event_id, verdict="useful")
+        session.add(feedback)
+        await session.commit()
+        feedback_id = feedback.id
+
+    async with session_factory() as session:
+        result = await session.execute(select(Feedback).where(Feedback.id == feedback_id))
+        fetched = result.scalar_one()
+
+    assert fetched.note is None
+
+
+async def test_invalid_feedback_verdict_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+    event_id = await _seeded_event(session_factory, watch_id)
+
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(
+                Feedback(watch_id=watch_id, event_id=event_id, verdict="bogus")
+            )
+            await session.commit()
+
+
+async def test_feedback_orphan_watch_id_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+    event_id = await _seeded_event(session_factory, watch_id)
+
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(
+                Feedback(watch_id=uuid.uuid4(), event_id=event_id, verdict="useful")
+            )
+            await session.commit()
+
+
+async def test_feedback_orphan_event_id_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(
+                Feedback(watch_id=watch_id, event_id=uuid.uuid4(), verdict="useful")
             )
             await session.commit()
