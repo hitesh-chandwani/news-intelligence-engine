@@ -1,13 +1,20 @@
 """Tests for src/nie/models.py (the `Watch`, `ContextItem`, `Category`,
-`Source`, `Event`, `EventSource`, `EventRelation`, `EventCategory` models).
+`Source`, `Event`, `EventSource`, `EventRelation`, `EventCategory`,
+`NotificationPreference`, `Notification` models).
 
 Per _docs/testing-guidelines.md, DB-backed tests run against the real
 Docker Compose Postgres (`docker compose up db`), never mocked. This test
-runs the Alembic migration chain (issues #4, #5, #6, #7, #8, #9, #10, #42)
-against that live database, then exercises `Watch`/`ContextItem`/
-`Category`/`Source`/`Event`/`EventSource`/`EventRelation`/`EventCategory`
-through the async session factory to prove the mapping, unique/check
-constraints, and foreign keys all work end to end.
+runs the Alembic migration chain (issues #4, #5, #6, #7, #8, #9, #10, #42,
+#11) against that live database, then exercises `Watch`/`ContextItem`/
+`Category`/`Source`/`Event`/`EventSource`/`EventRelation`/`EventCategory`/
+`NotificationPreference`/`Notification` through the async session factory
+to prove the mapping, unique/check constraints, and foreign keys all work
+end to end.
+
+The `NotificationPreference`/`Notification` tests (#11) use a fresh
+`_seeded_watch`/`_seeded_event` per test, same as the `Source`/`Event`
+tests above, since `notification_preference.watch_id` is a one-row-per-
+watch primary key.
 
 The `Category` tests also exercise `nie.seed.categories.seed_categories`
 directly (#7) -- `category` is a small global lookup table (unlike `watch`,
@@ -44,6 +51,8 @@ from nie.models import (
     EventCategory,
     EventRelation,
     EventSource,
+    Notification,
+    NotificationPreference,
     Source,
     Watch,
 )
@@ -838,4 +847,182 @@ async def test_duplicate_event_category_pk_raises_integrity_error(
     with pytest.raises(IntegrityError):
         async with session_factory() as session:
             session.add(EventCategory(event_id=event_id, category_id=category_id))
+            await session.commit()
+
+
+async def test_notification_preference_default_min_importance_and_array_roundtrip(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+
+    async with session_factory() as session:
+        session.add(
+            NotificationPreference(
+                watch_id=watch_id,
+                categories=["markets", "policy"],
+                channels=["email", "telegram"],
+            )
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(NotificationPreference).where(NotificationPreference.watch_id == watch_id)
+        )
+        fetched = result.scalar_one()
+
+    assert fetched.min_importance == "medium"
+    assert fetched.categories == ["markets", "policy"]
+    assert fetched.channels == ["email", "telegram"]
+
+
+async def test_duplicate_notification_preference_watch_id_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+
+    async with session_factory() as session:
+        session.add(
+            NotificationPreference(watch_id=watch_id, categories=[], channels=[])
+        )
+        await session.commit()
+
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(
+                NotificationPreference(watch_id=watch_id, categories=[], channels=[])
+            )
+            await session.commit()
+
+
+async def test_invalid_notification_preference_min_importance_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(
+                NotificationPreference(
+                    watch_id=watch_id,
+                    min_importance="bogus",
+                    categories=[],
+                    channels=[],
+                )
+            )
+            await session.commit()
+
+
+async def test_notification_preference_orphan_watch_id_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(
+                NotificationPreference(watch_id=uuid.uuid4(), categories=[], channels=[])
+            )
+            await session.commit()
+
+
+async def test_create_and_read_back_fully_populated_notification(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+    event_id = await _seeded_event(session_factory, watch_id)
+    payload = {
+        "title": "Silver ETF inflows surge",
+        "what_happened": "ETF holdings rose by 3M ounces this week.",
+        "why_it_matters": "Investors are rotating into silver as a hedge.",
+        "category": "markets",
+        "importance": "critical",
+        "impact": "bullish",
+        "confidence": "medium",
+        "historical_context": "Similar inflows preceded the 2020 rally.",
+        "sources": ["https://example.com/silver-outlook"],
+    }
+
+    async with session_factory() as session:
+        notification = Notification(
+            watch_id=watch_id,
+            event_id=event_id,
+            reason="new-event",
+            payload=payload,
+            channels_sent=["email"],
+        )
+        session.add(notification)
+        await session.commit()
+        notification_id = notification.id
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(Notification).where(Notification.id == notification_id)
+        )
+        fetched = result.scalar_one()
+
+    assert fetched.id is not None
+    assert fetched.watch_id == watch_id
+    assert fetched.event_id == event_id
+    assert fetched.reason == "new-event"
+    assert fetched.payload == payload
+    assert fetched.channels_sent == ["email"]
+    assert fetched.created_at is not None
+    assert fetched.read_at is None
+
+
+async def test_invalid_notification_reason_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+    event_id = await _seeded_event(session_factory, watch_id)
+
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(
+                Notification(
+                    watch_id=watch_id,
+                    event_id=event_id,
+                    reason="bogus",
+                    payload={},
+                    channels_sent=[],
+                )
+            )
+            await session.commit()
+
+
+async def test_notification_orphan_watch_id_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+    event_id = await _seeded_event(session_factory, watch_id)
+
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(
+                Notification(
+                    watch_id=uuid.uuid4(),
+                    event_id=event_id,
+                    reason="new-event",
+                    payload={},
+                    channels_sent=[],
+                )
+            )
+            await session.commit()
+
+
+async def test_notification_orphan_event_id_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(
+                Notification(
+                    watch_id=watch_id,
+                    event_id=uuid.uuid4(),
+                    reason="new-event",
+                    payload={},
+                    channels_sent=[],
+                )
+            )
             await session.commit()
