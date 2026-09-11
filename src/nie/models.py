@@ -50,6 +50,22 @@ class Watch(Base):
     )
 
 
+class Category(Base):
+    """A category in the event category taxonomy (`design.md` §4, #7).
+
+    A small, global, seeded lookup table -- unlike `Watch`/`ContextItem` it
+    has no `created_at`/`updated_at` and no `watch_id` (`design.md` §4 lists
+    only `id`, `slug`, `name` for `category`). Rows are inserted by
+    `nie.seed.categories.seed_categories`, not created by users.
+    """
+
+    __tablename__ = "category"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    slug: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 class ContextItem(Base):
     """Background context attached to a `Watch` (`design.md` §4, #6).
 

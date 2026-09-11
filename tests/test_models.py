@@ -1,11 +1,18 @@
-"""Tests for src/nie/models.py (the `Watch` and `ContextItem` models).
+"""Tests for src/nie/models.py (the `Watch`, `ContextItem`, `Category` models).
 
 Per _docs/testing-guidelines.md, DB-backed tests run against the real
 Docker Compose Postgres (`docker compose up db`), never mocked. This test
-runs the Alembic migration chain (issues #4, #5, #6) against that live
-database, then exercises `Watch`/`ContextItem` through the async session
-factory to prove the mapping, unique/check constraints, and foreign key
-all work end to end.
+runs the Alembic migration chain (issues #4, #5, #6, #7) against that live
+database, then exercises `Watch`/`ContextItem`/`Category` through the async
+session factory to prove the mapping, unique/check constraints, and foreign
+key all work end to end.
+
+The `Category` tests also exercise `nie.seed.categories.seed_categories`
+directly (#7) -- `category` is a small global lookup table (unlike `watch`,
+it isn't given a fresh per-test-unique slug), so those tests rely on
+`seed_categories`'s idempotency to keep the table at exactly the 13 seeded
+rows across runs/re-runs, and must not insert any `Category` row with a slug
+outside that fixed set.
 """
 
 import uuid
@@ -20,7 +27,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nie.db import create_engine, create_session_factory
-from nie.models import ContextItem, Watch
+from nie.models import Category, ContextItem, Watch
+from nie.seed.categories import CATEGORIES, seed_categories
 
 REPO_ROOT = Path(__file__).parent.parent
 
@@ -199,4 +207,48 @@ async def test_context_item_invalid_watch_id_raises_integrity_error(
                     body="No watch references this.",
                 )
             )
+            await session.commit()
+
+
+async def test_seed_categories_inserts_all_thirteen_categories(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        await seed_categories(session)
+
+    async with session_factory() as session:
+        result = await session.execute(select(Category))
+        categories = result.scalars().all()
+
+    assert len(categories) == 13
+    assert {(c.slug, c.name) for c in categories} == set(CATEGORIES)
+
+
+async def test_seed_categories_is_idempotent(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        await seed_categories(session)
+
+    async with session_factory() as session:
+        await seed_categories(session)
+
+    async with session_factory() as session:
+        result = await session.execute(select(Category))
+        categories = result.scalars().all()
+
+    assert len(categories) == 13
+
+
+async def test_duplicate_category_slug_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        await seed_categories(session)
+
+    existing_slug, _ = CATEGORIES[0]
+
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(Category(slug=existing_slug, name="Duplicate"))
             await session.commit()
