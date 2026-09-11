@@ -14,7 +14,7 @@ from typing import Any
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Text, UniqueConstraint, Uuid, func
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -298,3 +298,75 @@ class ContextItem(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+
+class NotificationPreference(Base):
+    """A watch's notification settings (`design.md` §4, FR-023, FR-024).
+
+    ``watch_id`` is the primary key itself -- no synthetic ``id`` column,
+    unlike the `Watch`/`Source`/`Event` synthetic-id pattern -- because
+    `design.md` §4's column list for this table has no ``id``, and making
+    the foreign key the primary key is what enforces "one row per watch"
+    rather than a separate ``id`` + ``UniqueConstraint(watch_id)``.
+    ``min_importance`` is plain ``text`` + ``CheckConstraint``, same pattern
+    as `Watch.status`/`Event.importance`, restricted to the same value set
+    as `Event.importance`. ``categories``/``channels`` are Postgres
+    ``ARRAY(Text)`` -- flat string lists, not structured/dict data, so
+    `JSONB` (reserved for `Source.entities`/`Event.entities`-style fields)
+    doesn't apply here -- defaulting to an empty list, which means "all
+    categories"/no channels configured yet per `design.md`. No
+    `created_at`/`updated_at` -- `design.md` §4 lists none for this table,
+    same pattern as `Category`.
+    """
+
+    __tablename__ = "notification_preference"
+    __table_args__ = (
+        CheckConstraint(
+            "min_importance IN ('low', 'medium', 'high', 'critical')",
+            name="ck_notification_preference_min_importance",
+        ),
+    )
+
+    watch_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("watch.id"), primary_key=True
+    )
+    min_importance: Mapped[str] = mapped_column(Text, nullable=False, default="medium")
+    categories: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, default=list
+    )
+    channels: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, default=list)
+
+
+class Notification(Base):
+    """A generated notification for a `Watch`/`Event` pair (`design.md` §4,
+    FR-020, FR-021, FR-022).
+
+    ``reason`` is plain ``text`` + ``CheckConstraint``, same pattern as
+    every other status/verdict column in this module. ``payload`` is
+    `JSONB` -- a structured/dict field (rendered title, what happened, why
+    it matters, category, importance, impact, confidence, historical
+    context, source list), unlike the flat-list ``channels_sent``, which is
+    Postgres ``ARRAY(Text)`` like `NotificationPreference.categories`/
+    `channels`. ``read_at`` is nullable with no default -- in-app read
+    state, set later by #33/#38, out of scope here. No `updated_at` --
+    `design.md` §4 lists only `created_at` for this table.
+    """
+
+    __tablename__ = "notification"
+    __table_args__ = (
+        CheckConstraint(
+            "reason IN ('new-event', 'material-update')",
+            name="ck_notification_reason",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    watch_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("watch.id"), nullable=False)
+    event_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("event.id"), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    channels_sent: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
