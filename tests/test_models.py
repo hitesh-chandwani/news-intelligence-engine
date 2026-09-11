@@ -1,15 +1,23 @@
 """Tests for src/nie/models.py (the `Watch`, `ContextItem`, `Category`,
 `Source`, `Event`, `EventSource`, `EventRelation`, `EventCategory`,
-`NotificationPreference`, `Notification`, `Feedback` models).
+`NotificationPreference`, `Notification`, `Feedback`, `PipelineRun`
+models).
 
 Per _docs/testing-guidelines.md, DB-backed tests run against the real
 Docker Compose Postgres (`docker compose up db`), never mocked. This test
 runs the Alembic migration chain (issues #4, #5, #6, #7, #8, #9, #10, #42,
-#11, #12) against that live database, then exercises `Watch`/`ContextItem`/
-`Category`/`Source`/`Event`/`EventSource`/`EventRelation`/`EventCategory`/
-`NotificationPreference`/`Notification`/`Feedback` through the async
-session factory to prove the mapping, unique/check constraints, and
-foreign keys all work end to end.
+#11, #12, #13) against that live database, then exercises `Watch`/
+`ContextItem`/`Category`/`Source`/`Event`/`EventSource`/`EventRelation`/
+`EventCategory`/`NotificationPreference`/`Notification`/`Feedback`/
+`PipelineRun` through the async session factory to prove the mapping,
+unique/check constraints, and foreign keys all work end to end.
+
+The `PipelineRun` tests (#13) have no `_seeded_watch` fixture -- unlike
+every table before it, `pipeline_run` has no `watch_id` column. It also
+has no natural unique key (no `unique_slug`-style helper), so these tests
+assert against the row's own returned `id`, never a `COUNT(*)` against
+the shared DB, per `_docs/testing-guidelines.md`'s "don't depend on
+ordering between tests."
 
 The `Feedback` tests (#12) use a fresh `_seeded_watch`/`_seeded_event` per
 test, same as the `NotificationPreference`/`Notification` tests above.
@@ -57,6 +65,7 @@ from nie.models import (
     Feedback,
     Notification,
     NotificationPreference,
+    PipelineRun,
     Source,
     Watch,
 )
@@ -1133,4 +1142,77 @@ async def test_feedback_orphan_event_id_raises_integrity_error(
             session.add(
                 Feedback(watch_id=watch_id, event_id=uuid.uuid4(), verdict="useful")
             )
+            await session.commit()
+
+
+async def test_pipeline_run_lifecycle_create_running_then_update_to_terminal(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A run is created `running` with empty stats, then updated in place
+    (by its own `id`, never by row count) to a terminal status with
+    `finished_at` set and a populated `stats` payload."""
+    async with session_factory() as session:
+        run = PipelineRun(trigger="manual", status="running", stats={})
+        session.add(run)
+        await session.commit()
+        run_id = run.id
+
+    async with session_factory() as session:
+        result = await session.execute(select(PipelineRun).where(PipelineRun.id == run_id))
+        fetched = result.scalar_one()
+
+    assert fetched.id == run_id
+    assert fetched.trigger == "manual"
+    assert fetched.status == "running"
+    assert fetched.stats == {}
+    assert fetched.started_at is not None
+    assert fetched.finished_at is None
+    assert fetched.error is None
+
+    finished_at = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
+    stats = {
+        "discovered": 5,
+        "extracted": 5,
+        "new_events": 1,
+        "updated_events": 0,
+        "notified": 1,
+        "errors": 0,
+    }
+
+    async with session_factory() as session:
+        result = await session.execute(select(PipelineRun).where(PipelineRun.id == run_id))
+        row = result.scalar_one()
+        row.status = "ok"
+        row.finished_at = finished_at
+        row.stats = stats
+        await session.commit()
+
+    async with session_factory() as session:
+        result = await session.execute(select(PipelineRun).where(PipelineRun.id == run_id))
+        fetched = result.scalar_one()
+
+    assert fetched.id == run_id
+    assert fetched.trigger == "manual"
+    assert fetched.status == "ok"
+    assert fetched.started_at is not None
+    assert fetched.finished_at == finished_at
+    assert fetched.stats == stats
+    assert fetched.error is None
+
+
+async def test_invalid_pipeline_run_trigger_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(PipelineRun(trigger="bogus", status="running", stats={}))
+            await session.commit()
+
+
+async def test_invalid_pipeline_run_status_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(PipelineRun(trigger="manual", status="bogus", stats={}))
             await session.commit()
