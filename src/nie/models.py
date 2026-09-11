@@ -4,6 +4,8 @@ One declarative ``Base`` for the whole app -- every table (this one and
 #6-#14) is declared in this module, per the layout in ``_docs/design.md``
 §15 (``src/nie/models.py``, not a ``models/`` package). See
 ``_docs/design.md`` §4 for the source-of-truth schema.
+
+``Feedback`` (#12) is the last table in this schema.
 """
 
 from __future__ import annotations
@@ -370,3 +372,35 @@ class Notification(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class Feedback(Base):
+    """A user's verdict on an `Event` (`design.md` §4, FR-025, FR-026).
+
+    ``event_id`` is `nullable=False` -- every feedback row is against an
+    event, since the only write path is `POST /events/{id}/feedback`
+    (`design.md` §11/§12); there is no `notification_id` column. `verdict`
+    is plain `text` + `CheckConstraint`, same pattern as `Watch.status`/
+    `Notification.reason`/every other status/verdict column in this module.
+    `note` is a nullable free-text field for an optional user comment. Out
+    of scope here: the feedback submission HTTP API/UI (#39) and using
+    feedback in the context bundle/scoring (#27).
+    """
+
+    __tablename__ = "feedback"
+    __table_args__ = (
+        CheckConstraint(
+            "verdict IN ('useful', 'not_useful', 'too_many_similar', "
+            "'more_like_this', 'less_of_this')",
+            name="ck_feedback_verdict",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    watch_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("watch.id"), nullable=False)
+    event_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("event.id"), nullable=False)
+    verdict: Mapped[str] = mapped_column(Text, nullable=False)
+    note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
