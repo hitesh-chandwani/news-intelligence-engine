@@ -1,13 +1,13 @@
 """Tests for src/nie/models.py (the `Watch`, `ContextItem`, `Category`,
-`Source`, `Event`, `EventSource`, `EventRelation` models).
+`Source`, `Event`, `EventSource`, `EventRelation`, `EventCategory` models).
 
 Per _docs/testing-guidelines.md, DB-backed tests run against the real
 Docker Compose Postgres (`docker compose up db`), never mocked. This test
-runs the Alembic migration chain (issues #4, #5, #6, #7, #8, #9, #10)
+runs the Alembic migration chain (issues #4, #5, #6, #7, #8, #9, #10, #42)
 against that live database, then exercises `Watch`/`ContextItem`/
-`Category`/`Source`/`Event`/`EventSource`/`EventRelation` through the
-async session factory to prove the mapping, unique/check constraints,
-and foreign keys all work end to end.
+`Category`/`Source`/`Event`/`EventSource`/`EventRelation`/`EventCategory`
+through the async session factory to prove the mapping, unique/check
+constraints, and foreign keys all work end to end.
 
 The `Category` tests also exercise `nie.seed.categories.seed_categories`
 directly (#7) -- `category` is a small global lookup table (unlike `watch`,
@@ -37,7 +37,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nie.db import create_engine, create_session_factory
-from nie.models import Category, ContextItem, Event, EventRelation, EventSource, Source, Watch
+from nie.models import (
+    Category,
+    ContextItem,
+    Event,
+    EventCategory,
+    EventRelation,
+    EventSource,
+    Source,
+    Watch,
+)
 from nie.seed.categories import CATEGORIES, seed_categories
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -627,6 +636,25 @@ async def _seeded_source(
         return source.id
 
 
+async def _category_id_by_slug(
+    session_factory: async_sessionmaker[AsyncSession], slug: str
+) -> uuid.UUID:
+    """Ensure the 13 seeded categories exist and return the id for `slug`.
+
+    `EventCategory` tests must not insert `Category` rows of their own --
+    per this module's docstring, the `category` table is asserted elsewhere
+    to hold exactly the 13 seeded rows, and `seed_categories` is idempotent,
+    so calling it here is safe to repeat across tests/runs. Looks up by one
+    of the fixed `CATEGORIES` slugs rather than creating new rows.
+    """
+    async with session_factory() as session:
+        await seed_categories(session)
+
+    async with session_factory() as session:
+        result = await session.execute(select(Category).where(Category.slug == slug))
+        return result.scalar_one().id
+
+
 async def test_create_and_read_back_event_sources(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -767,4 +795,47 @@ async def test_event_relation_orphan_from_event_id_raises_integrity_error(
                     rationale="from_event_id does not reference any event.",
                 )
             )
+            await session.commit()
+
+
+async def test_create_and_read_back_event_categories(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+    event_id = await _seeded_event(session_factory, watch_id)
+    category_id_a = await _category_id_by_slug(session_factory, CATEGORIES[0][0])
+    category_id_b = await _category_id_by_slug(session_factory, CATEGORIES[1][0])
+
+    async with session_factory() as session:
+        session.add_all(
+            [
+                EventCategory(event_id=event_id, category_id=category_id_a),
+                EventCategory(event_id=event_id, category_id=category_id_b),
+            ]
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(EventCategory).where(EventCategory.event_id == event_id)
+        )
+        links = result.scalars().all()
+
+    assert {link.category_id for link in links} == {category_id_a, category_id_b}
+
+
+async def test_duplicate_event_category_pk_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+    event_id = await _seeded_event(session_factory, watch_id)
+    category_id = await _category_id_by_slug(session_factory, CATEGORIES[0][0])
+
+    async with session_factory() as session:
+        session.add(EventCategory(event_id=event_id, category_id=category_id))
+        await session.commit()
+
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(EventCategory(event_id=event_id, category_id=category_id))
             await session.commit()
