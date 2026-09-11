@@ -5,7 +5,7 @@ One declarative ``Base`` for the whole app -- every table (this one and
 §15 (``src/nie/models.py``, not a ``models/`` package). See
 ``_docs/design.md`` §4 for the source-of-truth schema.
 
-``Feedback`` (#12) is the last table in this schema.
+``PipelineRun`` (#13) is the last table in this schema.
 """
 
 from __future__ import annotations
@@ -404,3 +404,48 @@ class Feedback(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class PipelineRun(Base):
+    """An operational record of one execution of the discover->notify
+    pipeline (`design.md` §4 "observability", §5, §12).
+
+    Deliberately has **no** `watch_id`, unlike every other table so far --
+    `design.md` §4's opening note that "all tables carry `watch_id`" does
+    not apply here, since a `pipeline_run` row is about one execution of the
+    whole pipeline process (one scheduler firing one pipeline per process,
+    `design.md` §2), not domain data scoped to a single `Watch`. `trigger`
+    and `status` are plain `Text` + `CheckConstraint`, same pattern as every
+    other status/verdict column in this module. `started_at` uses
+    `server_default=func.now()` -- row creation *is* run start, same
+    pattern as `Source.discovered_at`/`Event.discovered_at`. `finished_at`
+    is nullable/no-default, unset while `status='running'` and set once the
+    run reaches a terminal status. `stats` is `JSONB`, `nullable=False`,
+    caller-supplied per-stage counts, same pattern as
+    `Source.entities`/`Event.entities`. `error` is nullable free text,
+    populated only when `status='failed'`.
+
+    Writing real stage data into this table (creating the row at run start,
+    updating `stats` per stage, setting the terminal
+    `status`/`finished_at`/`error`) is out of scope here -- that's the
+    pipeline runner's concern, #18 onward.
+    """
+
+    __tablename__ = "pipeline_run"
+    __table_args__ = (
+        CheckConstraint("trigger IN ('schedule', 'manual')", name="ck_pipeline_run_trigger"),
+        CheckConstraint(
+            "status IN ('running', 'ok', 'partial', 'failed')",
+            name="ck_pipeline_run_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    trigger: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    stats: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    error: Mapped[str | None] = mapped_column(Text)
