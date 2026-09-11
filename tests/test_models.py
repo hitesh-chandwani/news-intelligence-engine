@@ -1,12 +1,12 @@
 """Tests for src/nie/models.py (the `Watch`, `ContextItem`, `Category`,
-`Source` models).
+`Source`, `Event` models).
 
 Per _docs/testing-guidelines.md, DB-backed tests run against the real
 Docker Compose Postgres (`docker compose up db`), never mocked. This test
-runs the Alembic migration chain (issues #4, #5, #6, #7, #8) against that
-live database, then exercises `Watch`/`ContextItem`/`Category`/`Source`
-through the async session factory to prove the mapping, unique/check
-constraints, and foreign key all work end to end.
+runs the Alembic migration chain (issues #4, #5, #6, #7, #8, #9) against
+that live database, then exercises `Watch`/`ContextItem`/`Category`/
+`Source`/`Event` through the async session factory to prove the mapping,
+unique/check constraints, and foreign key all work end to end.
 
 The `Category` tests also exercise `nie.seed.categories.seed_categories`
 directly (#7) -- `category` is a small global lookup table (unlike `watch`,
@@ -15,15 +15,18 @@ it isn't given a fresh per-test-unique slug), so those tests rely on
 rows across runs/re-runs, and must not insert any `Category` row with a slug
 outside that fixed set.
 
-The `Source` tests (#8) use a fixed 384-length embedding list to match
-`pgvector.sqlalchemy.Vector(384)` (384 to match fastembed's
-`bge-small-en-v1.5`, `design.md` §3, §6).
+The `Source` and `Event` tests (#8, #9) use a fixed 384-length embedding
+list to match `pgvector.sqlalchemy.Vector(384)` (384 to match fastembed's
+`bge-small-en-v1.5`, `design.md` §3, §6). Unlike `Source.embedding`
+(nullable), `Event.embedding` is `nullable=False`, so every `Event` test
+below supplies one.
 """
 
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from alembic.command import upgrade
@@ -33,7 +36,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nie.db import create_engine, create_session_factory
-from nie.models import Category, ContextItem, Source, Watch
+from nie.models import Category, ContextItem, Event, Source, Watch
 from nie.seed.categories import CATEGORIES, seed_categories
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -421,5 +424,174 @@ async def test_source_invalid_watch_id_raises_integrity_error(
                     entities={},
                     status="discovered",
                 )
+            )
+            await session.commit()
+
+
+async def test_create_and_read_back_fully_populated_event(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+    slug = unique_slug("event")
+    embedding = [float(i) / 384 for i in range(384)]
+
+    async with session_factory() as session:
+        event = Event(
+            watch_id=watch_id,
+            title=f"Silver ETF inflows surge ({slug})",
+            fact_summary="ETF holdings rose by 3M ounces this week.",
+            interpretation="Investors are rotating into silver as a hedge.",
+            event_date=datetime(2026, 9, 1, tzinfo=UTC),
+            relevance="high",
+            importance="critical",
+            impact_direction="bullish",
+            impact_reason="Sustained inflows historically precede price rallies.",
+            impact_confidence="medium",
+            entities={"tickers": ["XAG"], "people": []},
+            embedding=embedding,
+        )
+        session.add(event)
+        await session.commit()
+        event_id = event.id
+
+    async with session_factory() as session:
+        result = await session.execute(select(Event).where(Event.id == event_id))
+        fetched = result.scalar_one()
+
+    assert fetched.id is not None
+    assert fetched.watch_id == watch_id
+    assert fetched.title == f"Silver ETF inflows surge ({slug})"
+    assert fetched.fact_summary == "ETF holdings rose by 3M ounces this week."
+    assert fetched.interpretation == "Investors are rotating into silver as a hedge."
+    assert fetched.event_date is not None
+    assert fetched.discovered_at is not None
+    assert fetched.relevance == "high"
+    assert fetched.importance == "critical"
+    assert fetched.impact_direction == "bullish"
+    assert fetched.impact_reason == "Sustained inflows historically precede price rallies."
+    assert fetched.impact_confidence == "medium"
+    assert fetched.entities == {"tickers": ["XAG"], "people": []}
+    assert fetched.embedding is not None
+    assert len(fetched.embedding) == 384
+    assert fetched.last_material_update_at is not None
+    assert fetched.created_at is not None
+    assert fetched.updated_at is not None
+
+
+async def test_event_scoring_fields_default_to_none(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+    slug = unique_slug("event")
+    embedding = [float(i) / 384 for i in range(384)]
+
+    async with session_factory() as session:
+        event = Event(
+            watch_id=watch_id,
+            title=f"Unscored event ({slug})",
+            fact_summary="Central bank announced a policy review.",
+            interpretation="Markets are awaiting further clarity.",
+            entities={"tickers": [], "people": []},
+            embedding=embedding,
+        )
+        session.add(event)
+        await session.commit()
+        event_id = event.id
+
+    async with session_factory() as session:
+        result = await session.execute(select(Event).where(Event.id == event_id))
+        fetched = result.scalar_one()
+
+    assert fetched.relevance is None
+    assert fetched.importance is None
+    assert fetched.impact_direction is None
+    assert fetched.impact_reason is None
+    assert fetched.impact_confidence is None
+
+
+def _event_kwargs(watch_id: uuid.UUID, slug: str) -> dict[str, Any]:
+    """Base valid kwargs for constructing an `Event`, so each invalid-value
+    test only has to override the one column under test."""
+    return {
+        "watch_id": watch_id,
+        "title": f"Test event ({slug})",
+        "fact_summary": "Some observed fact.",
+        "interpretation": "Some interpretation.",
+        "entities": {},
+        "embedding": [float(i) / 384 for i in range(384)],
+    }
+
+
+async def test_invalid_event_relevance_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(
+                Event(
+                    **_event_kwargs(watch_id, unique_slug("bogus-relevance")),
+                    relevance="bogus",
+                )
+            )
+            await session.commit()
+
+
+async def test_invalid_event_importance_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(
+                Event(
+                    **_event_kwargs(watch_id, unique_slug("bogus-importance")),
+                    importance="bogus",
+                )
+            )
+            await session.commit()
+
+
+async def test_invalid_event_impact_direction_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(
+                Event(
+                    **_event_kwargs(watch_id, unique_slug("bogus-impact-direction")),
+                    impact_direction="bogus",
+                )
+            )
+            await session.commit()
+
+
+async def test_invalid_event_impact_confidence_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    watch_id = await _seeded_watch(session_factory)
+
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(
+                Event(
+                    **_event_kwargs(watch_id, unique_slug("bogus-impact-confidence")),
+                    impact_confidence="bogus",
+                )
+            )
+            await session.commit()
+
+
+async def test_event_invalid_watch_id_raises_integrity_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session:
+            session.add(
+                Event(**_event_kwargs(uuid.uuid4(), unique_slug("orphan-event")))
             )
             await session.commit()
