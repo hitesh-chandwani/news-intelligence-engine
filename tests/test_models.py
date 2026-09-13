@@ -321,7 +321,7 @@ async def test_create_and_read_back_source(
             published_at=datetime(2026, 9, 1, tzinfo=UTC),
             content="Silver prices rose on ETF inflows.",
             extracted_at=datetime(2026, 9, 1, 1, tzinfo=UTC),
-            entities={"tickers": ["XAG"], "people": []},
+            entities=["XAG"],
             embedding=embedding,
             status="extracted",
             triage_note="Relevant to silver ETF flows.",
@@ -343,7 +343,7 @@ async def test_create_and_read_back_source(
     assert fetched.discovered_at is not None
     assert fetched.content == "Silver prices rose on ETF inflows."
     assert fetched.extracted_at is not None
-    assert fetched.entities == {"tickers": ["XAG"], "people": []}
+    assert fetched.entities == ["XAG"]
     assert fetched.embedding is not None
     assert len(fetched.embedding) == 384
     assert fetched.status == "extracted"
@@ -363,7 +363,7 @@ async def test_duplicate_watch_id_url_raises_integrity_error(
                 url=url,
                 title="First",
                 source_name="Example News",
-                entities={},
+                entities=[],
                 status="discovered",
             )
         )
@@ -377,7 +377,7 @@ async def test_duplicate_watch_id_url_raises_integrity_error(
                     url=url,
                     title="Second",
                     source_name="Example News",
-                    entities={},
+                    entities=[],
                     status="discovered",
                 )
             )
@@ -399,7 +399,7 @@ async def test_same_url_under_different_watches_succeeds(
                     url=url,
                     title="Silver angle",
                     source_name="Example News",
-                    entities={},
+                    entities=[],
                     status="discovered",
                 ),
                 Source(
@@ -407,7 +407,7 @@ async def test_same_url_under_different_watches_succeeds(
                     url=url,
                     title="Gold angle",
                     source_name="Example News",
-                    entities={},
+                    entities=[],
                     status="discovered",
                 ),
             ]
@@ -435,7 +435,7 @@ async def test_invalid_source_status_raises_integrity_error(
                     url="https://example.com/bogus-status",
                     title="Bogus status",
                     source_name="Example News",
-                    entities={},
+                    entities=[],
                     status="bogus",
                 )
             )
@@ -453,7 +453,7 @@ async def test_source_invalid_watch_id_raises_integrity_error(
                     url="https://example.com/orphan-source",
                     title="Orphan",
                     source_name="Example News",
-                    entities={},
+                    entities=[],
                     status="discovered",
                 )
             )
@@ -479,7 +479,7 @@ async def test_create_and_read_back_fully_populated_event(
             impact_direction="bullish",
             impact_reason="Sustained inflows historically precede price rallies.",
             impact_confidence="medium",
-            entities={"tickers": ["XAG"], "people": []},
+            entities=["XAG"],
             embedding=embedding,
         )
         session.add(event)
@@ -502,7 +502,7 @@ async def test_create_and_read_back_fully_populated_event(
     assert fetched.impact_direction == "bullish"
     assert fetched.impact_reason == "Sustained inflows historically precede price rallies."
     assert fetched.impact_confidence == "medium"
-    assert fetched.entities == {"tickers": ["XAG"], "people": []}
+    assert fetched.entities == ["XAG"]
     assert fetched.embedding is not None
     assert len(fetched.embedding) == 384
     assert fetched.last_material_update_at is not None
@@ -523,7 +523,7 @@ async def test_event_scoring_fields_default_to_none(
             title=f"Unscored event ({slug})",
             fact_summary="Central bank announced a policy review.",
             interpretation="Markets are awaiting further clarity.",
-            entities={"tickers": [], "people": []},
+            entities=[],
             embedding=embedding,
         )
         session.add(event)
@@ -549,7 +549,7 @@ def _event_kwargs(watch_id: uuid.UUID, slug: str) -> dict[str, Any]:
         "title": f"Test event ({slug})",
         "fact_summary": "Some observed fact.",
         "interpretation": "Some interpretation.",
-        "entities": {},
+        "entities": [],
         "embedding": [float(i) / 384 for i in range(384)],
     }
 
@@ -650,7 +650,7 @@ async def _seeded_source(
             url=f"https://example.com/{unique_slug(prefix)}",
             title="Test source",
             source_name="Example News",
-            entities={},
+            entities=[],
             status="discovered",
         )
         session.add(source)
