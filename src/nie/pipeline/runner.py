@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from nie.db import async_session_factory
 from nie.models import PipelineRun
 from nie.pipeline.discover import discover_stage
+from nie.pipeline.extract import extract_stage
 
 # Every stage is an async callable taking the run's single shared
 # `AsyncSession` and returning its own `dict[str, int]` of counters (e.g.
@@ -42,12 +43,13 @@ async def _not_yet_implemented(session: AsyncSession) -> dict[str, int]:
     return {}
 
 
-# The 10 stages from `design.md` §5, in pipeline order. `discover` is the
-# first real stage (#19); every other entry still maps to the shared
-# no-op placeholder, swapped out one at a time in later issues.
+# The 10 stages from `design.md` §5, in pipeline order. `discover` (#19)
+# and `extract` (#20) are the first real stages; every other entry still
+# maps to the shared no-op placeholder, swapped out one at a time in
+# later issues.
 STAGE_REGISTRY: list[tuple[str, StageFn]] = [
     ("discover", discover_stage),
-    ("extract", _not_yet_implemented),
+    ("extract", extract_stage),
     ("triage", _not_yet_implemented),
     ("embed", _not_yet_implemented),
     ("match", _not_yet_implemented),
