@@ -44,6 +44,10 @@ python_version = "3.12"
 strict = true
 files = ["src", "tests", "alembic"]
 
+[[tool.mypy.overrides]]
+module = "feedparser"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
