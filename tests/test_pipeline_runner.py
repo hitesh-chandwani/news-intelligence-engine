@@ -6,6 +6,18 @@ Compose Postgres, never mocked. Follows `tests/test_run.py`'s
 test (`nie.db.create_engine`/`create_session_factory`), not the
 module-level singleton, so pooled asyncpg connections stay bound to this
 test's own event loop.
+
+`discover` (#19) is the first `STAGE_REGISTRY` entry to become a real
+stage rather than the shared no-op placeholder -- this module's own
+docstring anticipated exactly this ("each replacing its own
+`STAGE_REGISTRY` entry"). `test_all_stages_running_end_to_end_produce_an_ok_run`
+below isolates env and seeds the Silver watch so the real
+`discover_stage` succeeds without a network call, and only asserts that
+it *succeeded* (a `"discovered"` key), leaving the exact insert count to
+`tests/test_pipeline_discover.py` -- this file's own concern is the
+runner loop, not discover's business logic, and a previous run of the
+suite may have already discovered these same fixtures for this
+persistent watch.
 """
 
 from collections.abc import AsyncIterator
@@ -19,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from nie.db import create_engine, create_session_factory
 from nie.models import PipelineRun
 from nie.pipeline.runner import STAGE_REGISTRY, run_pipeline
+from nie.seed.run import seed
 
 REPO_ROOT = Path(__file__).parent.parent
 
@@ -54,9 +67,17 @@ async def _raising_stage(session: AsyncSession) -> dict[str, int]:
     raise ValueError("boom")
 
 
-async def test_all_no_op_stages_produce_an_ok_run(
+async def test_all_stages_running_end_to_end_produce_an_ok_run(
     session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # discover_stage (#19) builds its own Settings() -- force stub-only
+    # discovery so this run makes no network call and doesn't depend on
+    # RssProvider, and seed the Silver watch discover_stage looks up.
+    monkeypatch.setenv("DISCOVERY_PROVIDERS", "stub")
+    async with session_factory() as session:
+        await seed(session)
+
     run_id = await run_pipeline(session_factory, trigger="manual")
 
     async with session_factory() as session:
@@ -66,7 +87,11 @@ async def test_all_no_op_stages_produce_an_ok_run(
         assert run.status == "ok"
         assert run.finished_at is not None
         assert run.finished_at >= run.started_at
-        assert run.stats == {name: {} for name, _ in STAGE_REGISTRY}
+        assert set(run.stats["discover"]) == {"discovered"}
+        assert isinstance(run.stats["discover"]["discovered"], int)
+        for name, _ in STAGE_REGISTRY:
+            if name != "discover":
+                assert run.stats[name] == {}
 
 
 async def test_mixed_stages_produce_a_partial_run_and_keep_running_after_a_failure(
