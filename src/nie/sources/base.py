@@ -51,3 +51,38 @@ class DiscoveryProvider(Protocol):
     name: str
 
     def discover(self, watch: Watch, since: datetime) -> Iterable[CandidateItem]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ExtractedContent:
+    """Result of a successful `Extractor.extract` call.
+
+    Both fields are required strings, never `None` -- if an underlying
+    library returns no title for a page, an `Extractor` implementation
+    (e.g. `TrafilaturaExtractor`) coerces it to `""`.
+    """
+
+    title: str
+    text: str
+
+
+class ExtractionError(Exception):
+    """Raised by any `Extractor` on failure to produce `ExtractedContent`.
+
+    Covers both fetch failure (the URL could not be downloaded) and parse
+    failure (the downloaded HTML yielded no usable text) -- callers (the
+    pipeline's extract stage, #20) only need to catch this one exception
+    class to mark a `source` row `status='extract_failed'`.
+    """
+
+
+class Extractor(Protocol):
+    """Fetches a URL and returns its clean article content.
+
+    Unlike `DiscoveryProvider`, there is no `name` attribute: `design.md`
+    has no `EXTRACTORS` config selecting among multiple implementations
+    for MVP -- only `TrafilaturaExtractor` exists, so there's nothing to
+    key on.
+    """
+
+    def extract(self, url: str) -> ExtractedContent: ...
