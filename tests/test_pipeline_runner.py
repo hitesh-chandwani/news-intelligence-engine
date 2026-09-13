@@ -7,13 +7,14 @@ test (`nie.db.create_engine`/`create_session_factory`), not the
 module-level singleton, so pooled asyncpg connections stay bound to this
 test's own event loop.
 
-`discover` (#19) and `extract` (#20) are the first `STAGE_REGISTRY`
-entries to become real stages rather than the shared no-op placeholder --
-this module's own docstring anticipated exactly this ("each replacing
-its own `STAGE_REGISTRY` entry"). `test_all_stages_running_end_to_end_produce_an_ok_run`
-below isolates env and seeds the Silver watch so the real
-`discover_stage` succeeds without a network call, and only asserts that
-it *succeeded* (a `"discovered"` key), leaving the exact insert count to
+`discover` (#19), `extract` (#20), and `embed` (#21) are the first
+`STAGE_REGISTRY` entries to become real stages rather than the shared
+no-op placeholder -- this module's own docstring anticipated exactly
+this ("each replacing its own `STAGE_REGISTRY` entry").
+`test_all_stages_running_end_to_end_produce_an_ok_run` below isolates
+env and seeds the Silver watch so the real `discover_stage` succeeds
+without a network call, and only asserts that it *succeeded* (a
+`"discovered"` key), leaving the exact insert count to
 `tests/test_pipeline_discover.py` -- this file's own concern is the
 runner loop, not discover's business logic, and a previous run of the
 suite may have already discovered these same fixtures for this
@@ -22,7 +23,11 @@ fetch (same pattern as `tests/test_extract_trafilatura.py`) so that
 `extract_stage`, now real too, never makes a live network call against
 whatever the real `discover_stage` just inserted -- this test only
 asserts `extract`'s stats have the expected shape (per #20's stage
-contract), same as `discover`'s, not exact counts.
+contract), same as `discover`'s, not exact counts. `embed_stage`, now
+real too (#21), gets the same shape-only treatment: its selection has no
+`watch_id` filter either, so rows left behind by other test files
+sharing this never-truncated DB can make its exact count non-
+deterministic here.
 """
 
 from collections.abc import AsyncIterator
@@ -105,8 +110,15 @@ async def test_all_stages_running_end_to_end_produce_an_ok_run(
         assert set(run.stats["extract"]) == {"extracted", "extract_failed"}
         assert isinstance(run.stats["extract"]["extracted"], int)
         assert isinstance(run.stats["extract"]["extract_failed"], int)
+        # embed_stage (#21) is now real too, same as discover/extract: its
+        # global `status == "extracted" AND embedding IS NULL` selection
+        # (no watch_id filter, by design) can pick up rows left behind by
+        # other test files sharing this never-truncated DB, so only the
+        # shape of its stats is asserted here, not an exact count.
+        assert set(run.stats["embed"]) == {"embedded"}
+        assert isinstance(run.stats["embed"]["embedded"], int)
         for name, _ in STAGE_REGISTRY:
-            if name not in ("discover", "extract"):
+            if name not in ("discover", "extract", "embed"):
                 assert run.stats[name] == {}
 
 
