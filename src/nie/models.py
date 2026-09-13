@@ -88,7 +88,7 @@ class Source(Base):
     )
     content: Mapped[str | None] = mapped_column(Text)
     extracted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    entities: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    entities: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(384))
     status: Mapped[str] = mapped_column(Text, nullable=False)
     triage_note: Mapped[str | None] = mapped_column(Text)
@@ -172,7 +172,7 @@ class Event(Base):
     impact_direction: Mapped[str | None] = mapped_column(Text)
     impact_reason: Mapped[str | None] = mapped_column(Text)
     impact_confidence: Mapped[str | None] = mapped_column(Text)
-    entities: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    entities: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     embedding: Mapped[list[float]] = mapped_column(Vector(384), nullable=False)
     last_material_update_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
