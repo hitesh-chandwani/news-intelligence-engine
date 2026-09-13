@@ -17,7 +17,7 @@ handed a `Watch` or provider list by the runner.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -60,7 +60,7 @@ STAGE_REGISTRY: list[tuple[str, StageFn]] = [
 async def run_pipeline(
     session_factory: async_sessionmaker[AsyncSession] = async_session_factory,
     trigger: str = "manual",
-    stages: list[tuple[str, StageFn]] = STAGE_REGISTRY,
+    stages: Sequence[tuple[str, StageFn]] = STAGE_REGISTRY,
 ) -> uuid.UUID:
     """Run every stage in `stages`, in order, against one shared session.
 
