@@ -11,7 +11,10 @@ same `ExtractionError` -- see `nie.sources.base` for why.
 
 from __future__ import annotations
 
-import trafilatura
+# Re-exported (`as trafilatura`) so mypy's --strict --no-implicit-reexport
+# treats `extract_trafilatura.trafilatura` as part of this module's public
+# interface -- tests monkeypatch `trafilatura.fetch_url` through it.
+import trafilatura as trafilatura
 from trafilatura.settings import Document
 
 from nie.sources.base import ExtractedContent, ExtractionError
