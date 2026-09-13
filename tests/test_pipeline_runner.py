@@ -7,17 +7,22 @@ test (`nie.db.create_engine`/`create_session_factory`), not the
 module-level singleton, so pooled asyncpg connections stay bound to this
 test's own event loop.
 
-`discover` (#19) is the first `STAGE_REGISTRY` entry to become a real
-stage rather than the shared no-op placeholder -- this module's own
-docstring anticipated exactly this ("each replacing its own
-`STAGE_REGISTRY` entry"). `test_all_stages_running_end_to_end_produce_an_ok_run`
+`discover` (#19) and `extract` (#20) are the first `STAGE_REGISTRY`
+entries to become real stages rather than the shared no-op placeholder --
+this module's own docstring anticipated exactly this ("each replacing
+its own `STAGE_REGISTRY` entry"). `test_all_stages_running_end_to_end_produce_an_ok_run`
 below isolates env and seeds the Silver watch so the real
 `discover_stage` succeeds without a network call, and only asserts that
 it *succeeded* (a `"discovered"` key), leaving the exact insert count to
 `tests/test_pipeline_discover.py` -- this file's own concern is the
 runner loop, not discover's business logic, and a previous run of the
 suite may have already discovered these same fixtures for this
-persistent watch.
+persistent watch. `trafilatura.fetch_url` is monkeypatched to fail every
+fetch (same pattern as `tests/test_extract_trafilatura.py`) so that
+`extract_stage`, now real too, never makes a live network call against
+whatever the real `discover_stage` just inserted -- this test only
+asserts `extract`'s stats have the expected shape (per #20's stage
+contract), same as `discover`'s, not exact counts.
 """
 
 from collections.abc import AsyncIterator
@@ -32,6 +37,7 @@ from nie.db import create_engine, create_session_factory
 from nie.models import PipelineRun
 from nie.pipeline.runner import STAGE_REGISTRY, run_pipeline
 from nie.seed.run import seed
+from nie.sources import extract_trafilatura
 
 REPO_ROOT = Path(__file__).parent.parent
 
@@ -75,6 +81,13 @@ async def test_all_stages_running_end_to_end_produce_an_ok_run(
     # discovery so this run makes no network call and doesn't depend on
     # RssProvider, and seed the Silver watch discover_stage looks up.
     monkeypatch.setenv("DISCOVERY_PROVIDERS", "stub")
+    # extract_stage (#20) is now real too: whatever discover_stage just
+    # inserted for the Silver watch gets picked up in the same run, so
+    # trafilatura.fetch_url is monkeypatched to fail every fetch -- this
+    # test only cares about the runner loop, not extraction outcomes, and
+    # a failed extraction (status="extract_failed") is still a fully
+    # valid, non-erroring stage result.
+    monkeypatch.setattr(extract_trafilatura.trafilatura, "fetch_url", lambda url: None)
     async with session_factory() as session:
         await seed(session)
 
@@ -89,8 +102,11 @@ async def test_all_stages_running_end_to_end_produce_an_ok_run(
         assert run.finished_at >= run.started_at
         assert set(run.stats["discover"]) == {"discovered"}
         assert isinstance(run.stats["discover"]["discovered"], int)
+        assert set(run.stats["extract"]) == {"extracted", "extract_failed"}
+        assert isinstance(run.stats["extract"]["extracted"], int)
+        assert isinstance(run.stats["extract"]["extract_failed"], int)
         for name, _ in STAGE_REGISTRY:
-            if name != "discover":
+            if name not in ("discover", "extract"):
                 assert run.stats[name] == {}
 
 
