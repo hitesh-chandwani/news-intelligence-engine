@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>"silver" - Google News</title>
+    <link>https://news.google.com/rss/search?q=silver</link>
+    <description>Google News</description>
+    <language>en-US</language>
+    <item>
+      <title>Silver surges to multi-year high on safe-haven demand - Reuters</title>
+      <link>https://news.google.com/rss/articles/CBMiXkFVX3lxTFBhbmVsMS1zaWx2ZXItc3VyZ2VzLXRvLW11bHRpLXllYXItaGlnaC1yZXV0ZXJz</link>
+      <guid>https://news.google.com/rss/articles/CBMiXkFVX3lxTFBhbmVsMS1zaWx2ZXItc3VyZ2VzLXRvLW11bHRpLXllYXItaGlnaC1yZXV0ZXJz</guid>
+      <source url="https://www.reuters.com">Reuters</source>
+      <description>&lt;p&gt;Silver surged to its highest level in over a decade.&lt;/p&gt;</description>
+      <pubDate>Fri, 12 Sep 2026 11:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Why silver is outperforming gold this year - Bloomberg</title>
+      <link>https://news.google.com/rss/articles/CBMiWkFVX3lxTE5CbG9vbWJlcmctc2lsdmVyLW91dHBlcmZvcm1pbmctZ29sZA</link>
+      <guid>https://news.google.com/rss/articles/CBMiWkFVX3lxTE5CbG9vbWJlcmctc2lsdmVyLW91dHBlcmZvcm1pbmctZ29sZA</guid>
+      <source url="https://www.bloomberg.com">Bloomberg</source>
+      <description>&lt;p&gt;Analysts point to industrial demand as the key driver.&lt;/p&gt;</description>
+      <pubDate>Sat, 13 Sep 2026 06:45:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Silver miners rally as spot price climbs - MarketWatch</title>
+      <link>https://news.google.com/rss/articles/CBMiWEFVX3lxTE1hcmtldFdhdGNoLXNpbHZlci1taW5lcnMtcmFsbHk</link>
+      <guid>https://news.google.com/rss/articles/CBMiWEFVX3lxTE1hcmtldFdhdGNoLXNpbHZlci1taW5lcnMtcmFsbHk</guid>
+      <source url="https://www.marketwatch.com">MarketWatch</source>
+      <description>&lt;p&gt;Shares of major silver miners jumped in early trading.&lt;/p&gt;</description>
+      <pubDate>Sat, 13 Sep 2026 12:20:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>

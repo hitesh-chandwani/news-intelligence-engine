@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Kitco News</title>
+    <link>https://www.kitco.com/news/</link>
+    <description>Precious metals news and commentary</description>
+    <language>en-us</language>
+    <item>
+      <title>Silver breaks above $30 as industrial demand surges</title>
+      <link>https://www.kitco.com/news/2026-09-10/silver-breaks-above-30.html</link>
+      <guid>https://www.kitco.com/news/2026-09-10/silver-breaks-above-30.html</guid>
+      <description>&lt;p&gt;Silver prices climbed past &lt;b&gt;$30 an ounce&lt;/b&gt; on Thursday as solar panel manufacturers reported record purchasing.&lt;/p&gt;</description>
+      <pubDate>Thu, 10 Sep 2026 14:30:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Silver ETF holdings hit a three-year high</title>
+      <link>https://www.kitco.com/news/2026-09-11/silver-etf-holdings-high.html</link>
+      <guid>https://www.kitco.com/news/2026-09-11/silver-etf-holdings-high.html</guid>
+      <description>&lt;p&gt;Total known global silver ETF holdings rose for the sixth straight week.&lt;/p&gt;</description>
+      <pubDate>Fri, 11 Sep 2026 09:15:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Mine supply disruptions weigh on silver output forecasts</title>
+      <link>https://www.kitco.com/news/2026-09-12/mine-supply-disruptions.html</link>
+      <guid>https://www.kitco.com/news/2026-09-12/mine-supply-disruptions.html</guid>
+      <description>&lt;p&gt;Analysts trimmed 2026 silver mine supply forecasts after strikes in Peru.&lt;/p&gt;</description>
+      <pubDate>Sat, 12 Sep 2026 08:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>
