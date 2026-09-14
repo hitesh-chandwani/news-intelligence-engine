@@ -30,6 +30,12 @@ from nie.models import Event, Source
 # touching the constant itself.
 MATCH_CANDIDATE_LIMIT = 5
 
+# A separate, independently tunable constant for #27's historical-context
+# lookup (`find_nearest_events`) -- different call site than
+# `MATCH_CANDIDATE_LIMIT`, and, per `design.md` §14, not a `Settings`/
+# `.env` field either.
+CONTEXT_EVENT_LIMIT = 5
+
 
 class MatchCandidate(NamedTuple):
     event_id: uuid.UUID
@@ -79,6 +85,39 @@ async def find_candidate_events(
             Event.watch_id == source.watch_id,
             func.coalesce(Event.event_date, Event.discovered_at) >= cutoff,
         )
+        .order_by(distance, Event.id)
+        .limit(limit)
+    )
+    result = await session.execute(query)
+    return [MatchCandidate(event_id=row.id, distance=row.distance) for row in result]
+
+
+async def find_nearest_events(
+    session: AsyncSession,
+    event: Event,
+    *,
+    limit: int = CONTEXT_EVENT_LIMIT,
+) -> list[MatchCandidate]:
+    """Rank same-watch `event` rows (excluding `event` itself) by cosine
+    distance to `event.embedding`, nearest first.
+
+    Sibling to `find_candidate_events`, built for #27's historical-context
+    bundle rather than #25's dedup/adjudication candidate list -- see the
+    issue's "Can `find_candidate_events` be reused as-is? No." section.
+    Unlike `find_candidate_events`, there is **no** recency filter here:
+    stage 8's context bundle wants relevant history regardless of age, not
+    only same-run dedup candidates.
+
+    Returns at most `limit` results ordered by cosine distance ascending,
+    with `Event.id` as a secondary sort key for deterministic output on a
+    tie, same precedent as `find_candidate_events`. Returns `[]` when
+    nothing else qualifies (e.g. `event` is the only row for its watch).
+    Does not alter `find_candidate_events`'s existing behavior.
+    """
+    distance = Event.embedding.cosine_distance(event.embedding)
+    query = (
+        select(Event.id, distance.label("distance"))
+        .where(Event.watch_id == event.watch_id, Event.id != event.id)
         .order_by(distance, Event.id)
         .limit(limit)
     )
