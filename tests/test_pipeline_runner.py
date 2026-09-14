@@ -66,6 +66,19 @@ constraint list, but wiring the real stage into `STAGE_REGISTRY` (the
 issue's own acceptance criteria) breaks this pre-existing end-to-end
 assertion otherwise, exactly as #24/#25 already needed the same
 treatment here -- same precedent, not a new one.
+
+`score_stage` (#28) is now real too, same `LLMClient`-stubbing treatment
+as `synthesize_stage`'s: `nie.pipeline.score.LLMClient` is monkeypatched
+to a stub whose `call_structured` always returns a legal `ScoreResult`
+(`relevance="irrelevant"`, the simplest legal verdict -- still fills in
+every other field, per #28's uniform-write acceptance criterion), so this
+run makes no real LLM call and needs no API key. `score_stage`'s own
+selection (`Event.relevance.is_(None)`) has no `watch_id` filter either,
+so -- like `synthesize`'s -- this test doesn't assert its exact counts,
+only that its stats have the expected shape; `tests/test_pipeline_score.py`
+owns score's actual business-logic coverage. Same "not in the issue's own
+Files: list, but wiring into STAGE_REGISTRY breaks this pre-existing
+end-to-end assertion otherwise" precedent as #24/#25/#26 above.
 """
 
 from collections.abc import AsyncIterator
@@ -79,10 +92,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from nie.db import create_engine, create_session_factory
 from nie.models import PipelineRun
 from nie.pipeline import adjudicate as adjudicate_module
+from nie.pipeline import score as score_module
 from nie.pipeline import synthesize as synthesize_module
 from nie.pipeline import triage as triage_module
 from nie.pipeline.adjudicate import AdjudicationResult
 from nie.pipeline.runner import STAGE_REGISTRY, run_pipeline
+from nie.pipeline.score import ScoreResult
 from nie.pipeline.synthesize import EventRecord
 from nie.pipeline.triage import TriageResult
 from nie.seed.run import seed
@@ -174,6 +189,28 @@ class _StubSynthesizeClient:
         )
 
 
+class _StubScoreClient:
+    """No-network stand-in for `LLMClient` -- always an `"irrelevant"`
+    verdict.
+
+    `score_stage` only ever calls `call_structured`, so this stub
+    implements just that one method. `"irrelevant"` is the simplest legal
+    `ScoreResult` -- still fills in every other field, per #28's
+    uniform-write acceptance criterion (no special-casing `irrelevant`).
+    """
+
+    async def call_structured(
+        self, messages: list[dict[str, str]], response_model: type[ScoreResult]
+    ) -> ScoreResult:
+        return response_model(
+            relevance="irrelevant",
+            importance="low",
+            impact_direction="neutral",
+            impact_reason="Stub score verdict.",
+            impact_confidence="low",
+        )
+
+
 async def test_all_stages_running_end_to_end_produce_an_ok_run(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -205,6 +242,10 @@ async def test_all_stages_running_end_to_end_produce_an_ok_run(
     monkeypatch.setattr(
         synthesize_module, "LLMClient", lambda *args, **kwargs: _StubSynthesizeClient()
     )
+    # score_stage (#28) is now real too -- stub the `LLMClient` it
+    # constructs for itself (no `client` is passed through the registry)
+    # so this run makes no real LLM call and needs no API key.
+    monkeypatch.setattr(score_module, "LLMClient", lambda *args, **kwargs: _StubScoreClient())
     async with session_factory() as session:
         await seed(session)
 
@@ -261,6 +302,14 @@ async def test_all_stages_running_end_to_end_produce_an_ok_run(
         assert isinstance(run.stats["synthesize"]["existing_updated"], int)
         assert isinstance(run.stats["synthesize"]["existing_linked"], int)
         assert isinstance(run.stats["synthesize"]["skipped"], int)
+        # score_stage (#28) is now real too, same shape-only treatment as
+        # synthesize's above: its global `Event.relevance.is_(None)`
+        # selection (no `watch_id` filter, by design) can pick up rows
+        # left behind by other test files sharing this never-truncated DB.
+        assert set(run.stats["score"]) == {"irrelevant", "scored", "skipped"}
+        assert isinstance(run.stats["score"]["irrelevant"], int)
+        assert isinstance(run.stats["score"]["scored"], int)
+        assert isinstance(run.stats["score"]["skipped"], int)
         for name, _ in STAGE_REGISTRY:
             if name not in (
                 "discover",
@@ -269,6 +318,7 @@ async def test_all_stages_running_end_to_end_produce_an_ok_run(
                 "embed",
                 "adjudicate",
                 "synthesize",
+                "score",
             ):
                 assert run.stats[name] == {}
 

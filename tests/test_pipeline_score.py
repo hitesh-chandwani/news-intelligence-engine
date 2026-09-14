@@ -31,17 +31,26 @@ import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from alembic.command import upgrade
 from alembic.config import Config
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from nie.config import Settings
 from nie.db import create_engine, create_session_factory
+from nie.llm.client import LLMClient
 from nie.models import Category, ContextItem, Event, EventCategory, EventRelation, Feedback, Watch
 from nie.pipeline.match import MatchCandidate, find_nearest_events
-from nie.pipeline.score import ContextBundle, FeedbackBucket, RelatedEvent, build_context_bundle
+from nie.pipeline.score import (
+    ContextBundle,
+    FeedbackBucket,
+    RelatedEvent,
+    build_context_bundle,
+    score_stage,
+)
 from nie.seed.categories import seed_categories
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -98,6 +107,30 @@ async def session_factory(migrated_db: None) -> AsyncIterator[async_sessionmaker
         await engine.dispose()
 
 
+@pytest.fixture(autouse=True)
+async def _clear_stale_unscored_events(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Move every pre-existing `relevance IS NULL` `event` row out of
+    `score_stage`'s selection.
+
+    `score_stage`'s selection query is global -- `Event.relevance.is_(None)`,
+    no `watch_id` filter, by design (per the issue). The Compose Postgres is
+    shared and never truncated between test runs, so any event left
+    unscored by an earlier test run (or an earlier test in this file that
+    doesn't itself call `score_stage`) would otherwise leak into a later
+    test's selection -- same global-selection-query test-pollution
+    `tests/test_pipeline_adjudicate.py` hits for its own selection query.
+    Runs before each test's own event rows are created, so it only ever
+    touches pre-existing rows, never the test's own fixtures.
+    """
+    async with session_factory() as session:
+        await session.execute(
+            update(Event).where(Event.relevance.is_(None)).values(relevance="irrelevant")
+        )
+        await session.commit()
+
+
 async def _make_watch(session: AsyncSession, prefix: str = "score-test") -> Watch:
     watch = Watch(slug=unique_slug(prefix), name="Score Test Watch", status="enabled")
     session.add(watch)
@@ -126,6 +159,55 @@ def _make_event(
 
 def _make_context_item(watch_id: uuid.UUID, *, kind: str, label: str) -> ContextItem:
     return ContextItem(watch_id=watch_id, kind=kind, label=label, body=f"Body for {label}.")
+
+
+# ---------------------------------------------------------------------------
+# score_stage LLM stub helpers -- same pattern
+# `tests/test_pipeline_adjudicate.py` uses: a real `LLMClient` built with
+# `Settings(_env_file=None, llm_api_key="test-key", ...)`, with
+# `client._client.chat.completions.create` monkeypatched to an `AsyncMock`.
+# ---------------------------------------------------------------------------
+
+
+def _settings() -> Settings:
+    return Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        llm_base_url="https://example-llm.test/v1",
+        llm_api_key="test-key",
+        llm_model="test-model",
+    )
+
+
+class _FakeMessage:
+    def __init__(self, content: str) -> None:
+        self.content = content
+
+
+class _FakeChoice:
+    def __init__(self, content: str) -> None:
+        self.message = _FakeMessage(content)
+
+
+class _FakeChatCompletion:
+    """Duck-types the small slice of `openai`'s `ChatCompletion` we read."""
+
+    def __init__(self, content: str) -> None:
+        self.choices = [_FakeChoice(content)]
+
+
+def _client_with_stubbed_create() -> tuple[LLMClient, AsyncMock]:
+    client = LLMClient(settings=_settings(), min_interval_seconds=0.0)
+    stub_create = AsyncMock()
+    client._client.chat.completions.create = stub_create  # type: ignore[method-assign]
+    return client, stub_create
+
+
+async def _fetch_event(
+    session_factory: async_sessionmaker[AsyncSession], event_id: uuid.UUID
+) -> Event:
+    async with session_factory() as session:
+        result = await session.execute(select(Event).where(Event.id == event_id))
+        return result.scalar_one()
 
 
 # ---------------------------------------------------------------------------
@@ -463,3 +545,314 @@ async def test_build_context_bundle_feedback_summary_buckets_by_category_and_win
         FeedbackBucket(category_slug=policy.slug, verdict="less_of_this", count=1),
         FeedbackBucket(category_slug=policy.slug, verdict="useful", count=1),
     ]
+
+
+# ---------------------------------------------------------------------------
+# score_stage (#28)
+# ---------------------------------------------------------------------------
+
+
+async def test_score_stage_persists_irrelevant_verdict(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    client, stub_create = _client_with_stubbed_create()
+    stub_create.return_value = _FakeChatCompletion(
+        '{"relevance": "irrelevant", "importance": "low", '
+        '"impact_direction": "neutral", "impact_reason": "Not related to silver.", '
+        '"impact_confidence": "low"}'
+    )
+
+    async with session_factory() as session:
+        watch = await _make_watch(session)
+        event = _make_event(watch.id, embedding=ANCHOR_EMBEDDING, title="Unrelated news")
+        session.add(event)
+        await session.commit()
+        event_id = event.id
+
+        result = await score_stage(session, client=client)
+        await session.commit()
+
+    assert result == {"irrelevant": 1, "scored": 0, "skipped": 0}
+
+    row = await _fetch_event(session_factory, event_id)
+    assert row.relevance == "irrelevant"
+    assert row.importance == "low"
+    assert row.impact_direction == "neutral"
+    assert row.impact_reason == "Not related to silver."
+    assert row.impact_confidence == "low"
+
+
+async def test_score_stage_persists_high_relevance_verdict(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    client, stub_create = _client_with_stubbed_create()
+    stub_create.return_value = _FakeChatCompletion(
+        '{"relevance": "high", "importance": "critical", '
+        '"impact_direction": "bullish", "impact_reason": "Major supply disruption.", '
+        '"impact_confidence": "high"}'
+    )
+
+    async with session_factory() as session:
+        watch = await _make_watch(session)
+        event = _make_event(watch.id, embedding=ANCHOR_EMBEDDING, title="Silver mine strike")
+        session.add(event)
+        await session.commit()
+        event_id = event.id
+
+        result = await score_stage(session, client=client)
+        await session.commit()
+
+    assert result == {"irrelevant": 0, "scored": 1, "skipped": 0}
+
+    row = await _fetch_event(session_factory, event_id)
+    assert row.relevance == "high"
+    assert row.importance == "critical"
+    assert row.impact_direction == "bullish"
+    assert row.impact_reason == "Major supply disruption."
+    assert row.impact_confidence == "high"
+
+
+async def test_score_stage_persists_unclear_impact_direction(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """`"unclear"` is a valid, not a fallback, `impact_direction` value."""
+    client, stub_create = _client_with_stubbed_create()
+    stub_create.return_value = _FakeChatCompletion(
+        '{"relevance": "medium", "importance": "medium", '
+        '"impact_direction": "unclear", "impact_reason": "Conflicting signals.", '
+        '"impact_confidence": "medium"}'
+    )
+
+    async with session_factory() as session:
+        watch = await _make_watch(session)
+        event = _make_event(watch.id, embedding=ANCHOR_EMBEDDING, title="Mixed signals report")
+        session.add(event)
+        await session.commit()
+        event_id = event.id
+
+        result = await score_stage(session, client=client)
+        await session.commit()
+
+    assert result == {"irrelevant": 0, "scored": 1, "skipped": 0}
+
+    row = await _fetch_event(session_factory, event_id)
+    assert row.relevance == "medium"
+    assert row.importance == "medium"
+    assert row.impact_direction == "unclear"
+    assert row.impact_reason == "Conflicting signals."
+    assert row.impact_confidence == "medium"
+
+
+async def test_score_stage_skips_row_malformed_on_both_attempts(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    client, stub_create = _client_with_stubbed_create()
+    # Structurally valid JSON but violates the `impact_reason` min_length
+    # constraint on both `call_structured` attempts -> `ValidationError`
+    # both times.
+    stub_create.side_effect = [
+        _FakeChatCompletion(
+            '{"relevance": "high", "importance": "high", '
+            '"impact_direction": "bullish", "impact_reason": "", '
+            '"impact_confidence": "high"}'
+        ),
+        _FakeChatCompletion(
+            '{"relevance": "high", "importance": "high", '
+            '"impact_direction": "bullish", "impact_reason": "", '
+            '"impact_confidence": "high"}'
+        ),
+    ]
+
+    async with session_factory() as session:
+        watch = await _make_watch(session)
+        event = _make_event(watch.id, embedding=ANCHOR_EMBEDDING, title="Bad response event")
+        session.add(event)
+        await session.commit()
+        event_id = event.id
+
+        result = await score_stage(session, client=client)
+        await session.commit()
+
+    assert result == {"irrelevant": 0, "scored": 0, "skipped": 1}
+    assert stub_create.call_count == 2
+
+    row = await _fetch_event(session_factory, event_id)
+    assert row.relevance is None
+    assert row.importance is None
+    assert row.impact_direction is None
+    assert row.impact_reason is None
+    assert row.impact_confidence is None
+
+
+async def test_score_stage_selection_skips_already_scored_events(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    client, stub_create = _client_with_stubbed_create()
+    stub_create.return_value = _FakeChatCompletion(
+        '{"relevance": "medium", "importance": "medium", '
+        '"impact_direction": "neutral", "impact_reason": "Some reason.", '
+        '"impact_confidence": "medium"}'
+    )
+
+    async with session_factory() as session:
+        watch = await _make_watch(session)
+        already_scored = _make_event(
+            watch.id, embedding=ANCHOR_EMBEDDING, title="Already scored event"
+        )
+        already_scored.relevance = "low"
+        already_scored.importance = "low"
+        already_scored.impact_direction = "neutral"
+        already_scored.impact_reason = "Existing reason, untouched."
+        already_scored.impact_confidence = "low"
+        unscored = _make_event(
+            watch.id, embedding=DIST_0_EMBEDDING, title="Not yet scored event"
+        )
+        session.add_all([already_scored, unscored])
+        await session.commit()
+        already_scored_id = already_scored.id
+        unscored_id = unscored.id
+
+        result = await score_stage(session, client=client)
+        await session.commit()
+
+    assert result == {"irrelevant": 0, "scored": 1, "skipped": 0}
+    assert stub_create.call_count == 1
+
+    already_scored_row = await _fetch_event(session_factory, already_scored_id)
+    assert already_scored_row.relevance == "low"
+    assert already_scored_row.importance == "low"
+    assert already_scored_row.impact_direction == "neutral"
+    assert already_scored_row.impact_reason == "Existing reason, untouched."
+    assert already_scored_row.impact_confidence == "low"
+
+    unscored_row = await _fetch_event(session_factory, unscored_id)
+    assert unscored_row.relevance == "medium"
+    assert unscored_row.importance == "medium"
+
+
+async def test_score_stage_renders_full_context_bundle_in_prompt(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A real prompt-content check: builds a `ContextBundle`-producing
+    fixture (system/user context items, a relation-linked related event,
+    and a feedback row) and asserts the rendered prompt sent to the stub
+    actually contains that content -- not just asserted in prose."""
+    client, stub_create = _client_with_stubbed_create()
+    stub_create.return_value = _FakeChatCompletion(
+        '{"relevance": "medium", "importance": "medium", '
+        '"impact_direction": "neutral", "impact_reason": "Some reason.", '
+        '"impact_confidence": "medium"}'
+    )
+
+    async with session_factory() as session:
+        watch = await _make_watch(session)
+
+        system_item = _make_context_item(
+            watch.id, kind="system", label="Silver Background Fact"
+        )
+        user_item = _make_context_item(watch.id, kind="user", label="User Watch Note")
+        session.add_all([system_item, user_item])
+
+        anchor = _make_event(
+            watch.id,
+            embedding=ANCHOR_EMBEDDING,
+            entities=["Apple", "Fed"],
+            title="Anchor event to be scored",
+        )
+        related = _make_event(
+            watch.id,
+            embedding=FAR_EMBEDDING_5,
+            entities=["Apple"],
+            title="Related historical event",
+        )
+        # Already scored -- must not itself be picked up by score_stage's
+        # selection; only `anchor` should be scored in this test.
+        related.relevance = "medium"
+        session.add_all([anchor, related])
+        await session.commit()
+        await session.refresh(anchor)
+        await session.refresh(related)
+
+        session.add(
+            EventRelation(
+                from_event_id=anchor.id,
+                to_event_id=related.id,
+                relation="precedes",
+                rationale="Fixture relation.",
+            )
+        )
+
+        await seed_categories(session)
+        markets_result = await session.execute(select(Category).where(Category.slug == "market"))
+        markets = markets_result.scalar_one()
+        session.add(EventCategory(event_id=anchor.id, category_id=markets.id))
+        await session.commit()
+
+        session.add(
+            Feedback(
+                watch_id=watch.id,
+                event_id=anchor.id,
+                verdict="useful",
+                created_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+        anchor_id = anchor.id
+
+        result = await score_stage(session, client=client)
+        await session.commit()
+
+    assert result == {"irrelevant": 0, "scored": 1, "skipped": 0}
+
+    prompt_content = stub_create.call_args.kwargs["messages"][0]["content"]
+
+    # System/user context items.
+    assert system_item.label in prompt_content
+    assert system_item.body in prompt_content
+    assert user_item.label in prompt_content
+    assert user_item.body in prompt_content
+
+    # Related event content -- title, matched_via tag, shared entity.
+    assert "Related historical event" in prompt_content
+    assert "relation:precedes" in prompt_content
+    assert "Apple" in prompt_content
+
+    # Feedback summary line.
+    assert "market: 1 x 'useful'" in prompt_content
+
+    # The event itself, last.
+    assert "Anchor event to be scored" in prompt_content
+
+    assert anchor_id is not None
+
+
+async def test_score_stage_does_not_touch_fact_summary_or_interpretation(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Regression guard: `score_stage` reads `fact_summary`/
+    `interpretation` for the prompt only, never writes them -- even with a
+    stub response that doesn't correspond to the seeded values."""
+    client, stub_create = _client_with_stubbed_create()
+    stub_create.return_value = _FakeChatCompletion(
+        '{"relevance": "high", "importance": "critical", '
+        '"impact_direction": "bearish", "impact_reason": "Unrelated stub reason.", '
+        '"impact_confidence": "high"}'
+    )
+
+    async with session_factory() as session:
+        watch = await _make_watch(session)
+        event = _make_event(watch.id, embedding=ANCHOR_EMBEDDING, title="Regression event")
+        original_fact_summary = event.fact_summary
+        original_interpretation = event.interpretation
+        session.add(event)
+        await session.commit()
+        event_id = event.id
+
+        result = await score_stage(session, client=client)
+        await session.commit()
+
+    assert result == {"irrelevant": 0, "scored": 1, "skipped": 0}
+
+    row = await _fetch_event(session_factory, event_id)
+    assert row.fact_summary == original_fact_summary
+    assert row.interpretation == original_interpretation
