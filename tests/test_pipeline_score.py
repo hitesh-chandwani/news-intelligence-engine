@@ -11,17 +11,18 @@ Neither `find_nearest_events` nor `build_context_bundle` makes a live
 network or LLM call. Every embedding used below is a hand-authored fixed
 384-length float list (mostly zeros with one or two components set), same
 precedent as `tests/test_pipeline_match.py` -- these tests exercise the
-SQL/filtering/merge/dedup logic, not embedding quality. `Category` rows
-are hand-rolled fixture rows (not the real seeded taxonomy) -- this
-module doesn't need the 13 real slugs, only that the `event_category`
-join groups correctly, same "small hand-authored fixture" precedent
-`_docs/testing-guidelines.md` recommends.
+SQL/filtering/merge/dedup logic, not embedding quality. The feedback test
+seeds the real category taxonomy via `nie.seed.categories.seed_categories`
+(idempotent) and reuses two of its existing slugs, rather than inserting
+new `Category` rows -- `tests/test_models.py`/`tests/test_run.py` assert
+the table holds exactly the 13 seeded categories, and the Compose Postgres
+is never truncated between test runs, so a hand-rolled extra `Category`
+row here would permanently pollute that global count for every other
+test file.
 
-Each test creates its own `Watch`/`Category` rows with `unique_slug`
-(same helper `tests/test_models.py`/`tests/test_pipeline_match.py`
-define), keeping tests independent of each other and of any prior run's
-leftover rows (the Compose Postgres is never truncated between test
-runs).
+Each test creates its own `Watch` row(s) with `unique_slug` (same helper
+`tests/test_models.py`/`tests/test_pipeline_match.py` define), keeping
+tests independent of each other and of any prior run's leftover rows.
 """
 
 from __future__ import annotations
@@ -34,12 +35,14 @@ from pathlib import Path
 import pytest
 from alembic.command import upgrade
 from alembic.config import Config
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nie.db import create_engine, create_session_factory
 from nie.models import Category, ContextItem, Event, EventCategory, EventRelation, Feedback, Watch
 from nie.pipeline.match import MatchCandidate, find_nearest_events
 from nie.pipeline.score import ContextBundle, FeedbackBucket, RelatedEvent, build_context_bundle
+from nie.seed.categories import seed_categories
 
 REPO_ROOT = Path(__file__).parent.parent
 
@@ -372,9 +375,13 @@ async def test_build_context_bundle_feedback_summary_buckets_by_category_and_win
         watch = await _make_watch(session)
         other_watch = await _make_watch(session, prefix="score-test-other")
 
-        markets = Category(slug=unique_slug("markets"), name="Markets")
-        policy = Category(slug=unique_slug("policy"), name="Policy")
-        session.add_all([markets, policy])
+        # Reuse two of the real, idempotently-seeded categories rather than
+        # inserting new `Category` rows -- see the module docstring.
+        await seed_categories(session)
+        markets_result = await session.execute(select(Category).where(Category.slug == "market"))
+        markets = markets_result.scalar_one()
+        policy_result = await session.execute(select(Category).where(Category.slug == "price"))
+        policy = policy_result.scalar_one()
 
         # event_x belongs to both categories -- a feedback row on it must
         # increment the count in both buckets (double-counts by design).
