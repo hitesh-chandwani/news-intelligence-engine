@@ -53,7 +53,6 @@ STAGE_REGISTRY: list[tuple[str, StageFn]] = [
     ("extract", extract_stage),
     ("triage", _not_yet_implemented),
     ("embed", embed_stage),
-    ("match", _not_yet_implemented),
     ("adjudicate", _not_yet_implemented),
     ("synthesize", _not_yet_implemented),
     ("score", _not_yet_implemented),
