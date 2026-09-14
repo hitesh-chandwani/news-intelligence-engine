@@ -15,14 +15,18 @@ ahead of any stage using it.
 
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import NamedTuple
+from pathlib import Path
+from typing import Literal, NamedTuple
 
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nie.llm.client import LLMClient
 from nie.models import (
     Category,
     ContextItem,
@@ -189,3 +193,177 @@ async def build_context_bundle(
         related_events=related_events,
         feedback_summary=feedback_summary,
     )
+
+
+# ---------------------------------------------------------------------------
+# score_stage (#28, `design.md` §5 stage 8)
+# ---------------------------------------------------------------------------
+
+_PROMPT_PATH = Path(__file__).parent.parent / "llm" / "prompts" / "score.md"
+_PROMPT_TEMPLATE = _PROMPT_PATH.read_text()
+
+_NO_CONTEXT_TEXT = "(none)"
+_NO_RELATED_EVENTS_TEXT = "(no related events found)"
+_NO_FEEDBACK_TEXT = "(no feedback recorded yet)"
+
+
+class ScoreResult(BaseModel):
+    """The LLM's structured scoring verdict for one `event` row, per
+    `score.md`. Field names/values mirror `Event`'s `CheckConstraint`s in
+    `models.py` exactly (same enum values; `direction`/`reason`/
+    `confidence` here carry the `impact_` prefix `Event`'s own columns do).
+    """
+
+    relevance: Literal["irrelevant", "low", "medium", "high"]
+    importance: Literal["low", "medium", "high", "critical"]
+    impact_direction: Literal["bullish", "bearish", "neutral", "unclear"]
+    impact_reason: str = Field(min_length=1)
+    impact_confidence: Literal["low", "medium", "high"]
+
+
+def _format_context_items(items: list[ContextItem]) -> str:
+    """Render a `system_context`/`user_context` list as one `label: body`
+    line per item, or the explicit "(none)" case for an empty list."""
+    if not items:
+        return _NO_CONTEXT_TEXT
+    return "\n".join(f"- {item.label}: {item.body}" for item in items)
+
+
+def _format_related_events(related_events: list[RelatedEvent]) -> str:
+    """Render the related-events section, in the bundle's own order
+    (nearest/most-linked first), or the explicit "no related events found"
+    case for an empty list."""
+    if not related_events:
+        return _NO_RELATED_EVENTS_TEXT
+
+    lines = []
+    for related in related_events:
+        event = related.event
+        matched_via = ", ".join(sorted(related.matched_via))
+        shared_entities = (
+            ", ".join(related.shared_entities) if related.shared_entities else "(none)"
+        )
+        lines.append(
+            f"- event_id: {event.id}\n"
+            f"  title: {event.title}\n"
+            f"  fact_summary: {event.fact_summary}\n"
+            f"  interpretation: {event.interpretation}\n"
+            f"  event_date: {event.event_date if event.event_date is not None else 'unknown'}\n"
+            f"  matched_via: {matched_via}\n"
+            f"  shared_entities: {shared_entities}"
+        )
+    return "\n".join(lines)
+
+
+def _format_feedback_summary(feedback_summary: list[FeedbackBucket]) -> str:
+    """Render one `"<category_slug>: <count> x '<verdict>'"` line per
+    bucket, or the explicit "no feedback recorded yet" case for an empty
+    list."""
+    if not feedback_summary:
+        return _NO_FEEDBACK_TEXT
+    return "\n".join(
+        f"{bucket.category_slug}: {bucket.count} x '{bucket.verdict}'"
+        for bucket in feedback_summary
+    )
+
+
+def _build_messages(event: Event, bundle: ContextBundle) -> list[dict[str, str]]:
+    """Render `score.md`'s five ordered sections: silver background
+    context, user context, related historical events, feedback summary,
+    then the event itself last -- so the model reasons over context first
+    and judges the specific event last."""
+    prompt = _PROMPT_TEMPLATE.format(
+        system_context=_format_context_items(bundle.system_context),
+        user_context=_format_context_items(bundle.user_context),
+        related_events=_format_related_events(bundle.related_events),
+        feedback_summary=_format_feedback_summary(bundle.feedback_summary),
+        title=event.title,
+        fact_summary=event.fact_summary,
+        interpretation=event.interpretation,
+        entities=event.entities,
+    )
+    return [{"role": "user", "content": prompt}]
+
+
+async def score_stage(session: AsyncSession, *, client: LLMClient | None = None) -> dict[str, int]:
+    """Score every `event` row not yet scored: `relevance`, `importance`,
+    `impact_direction`, `impact_reason`, `impact_confidence`.
+
+    `client` defaults to constructing its own `LLMClient()` when not given,
+    same as `adjudicate_stage`/`synthesize_stage`.
+
+    Selects rows via `select(Event).where(Event.relevance.is_(None))` and
+    processes them sequentially (no concurrency), same style as
+    `adjudicate_stage`/`synthesize_stage`. `relevance` is the one field of
+    the five this stage always sets regardless of verdict -- including
+    `irrelevant` -- so "has this event been scored yet" is exactly
+    `relevance IS NULL`.
+
+    For each row: loads its `Watch` (`Event.watch_id`), calls
+    `build_context_bundle(session, watch, event)` (#27), builds `messages`
+    from `score.md` (event + full bundle), and calls
+    `client.call_structured(messages, ScoreResult)`.
+
+    On a successful response, writes all five fields onto the `Event` row
+    from `ScoreResult`, uniformly -- no special-casing `irrelevant` (it
+    still gets `importance`/`impact_*` filled in from the same response;
+    the notify gate, #30, is what short-circuits on `irrelevant`, not this
+    stage). `fact_summary`/`interpretation` are read-only here, rendered
+    into the prompt only -- never written.
+
+    A `json.JSONDecodeError`/`pydantic.ValidationError` still raised after
+    `call_structured`'s own internal validate-then-retry-once is a per-row
+    failure: the event row is left completely unmodified (all five fields
+    stay `NULL`) and counted under `"skipped"`; the loop continues to the
+    next event. Any other exception propagates out of `score_stage`
+    uncaught, same precedent as `adjudicate_stage`/`synthesize_stage`.
+
+    Does not call `session.commit()` -- the runner (#18) commits after the
+    stage returns.
+
+    Returns `{"irrelevant": N, "scored": M, "skipped": S}` --
+    `irrelevant` counts `relevance == "irrelevant"` responses, `scored`
+    counts every other successfully-persisted `relevance` value combined
+    (`low`/`medium`/`high`).
+    """
+    if client is None:
+        client = LLMClient()
+
+    result = await session.execute(select(Event).where(Event.relevance.is_(None)))
+    events = result.scalars().all()
+
+    irrelevant_count = 0
+    scored_count = 0
+    skipped_count = 0
+
+    for event in events:
+        watch_result = await session.execute(select(Watch).where(Watch.id == event.watch_id))
+        watch = watch_result.scalar_one()
+
+        bundle = await build_context_bundle(session, watch, event)
+        messages = _build_messages(event, bundle)
+
+        try:
+            score = await client.call_structured(messages, ScoreResult)
+        except (json.JSONDecodeError, ValidationError):
+            skipped_count += 1
+            continue
+
+        assert isinstance(score, ScoreResult)
+
+        event.relevance = score.relevance
+        event.importance = score.importance
+        event.impact_direction = score.impact_direction
+        event.impact_reason = score.impact_reason
+        event.impact_confidence = score.impact_confidence
+
+        if score.relevance == "irrelevant":
+            irrelevant_count += 1
+        else:
+            scored_count += 1
+
+    return {
+        "irrelevant": irrelevant_count,
+        "scored": scored_count,
+        "skipped": skipped_count,
+    }
