@@ -119,7 +119,7 @@ class LLMClient:
         await self._rate_limiter.wait()
         response = await self._client.chat.completions.create(
             model=self._model,
-            messages=messages,  # type: ignore[arg-type]
+            messages=messages,  # type: ignore[call-overload]
             response_format={"type": "json_object"},
         )
         content = response.choices[0].message.content or ""
