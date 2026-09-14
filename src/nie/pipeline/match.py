@@ -17,7 +17,8 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import NamedTuple
 
-from sqlalchemy import func, select
+from sqlalchemy import cast, func, select
+from sqlalchemy.dialects.postgresql import ARRAY, TEXT
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nie.config import Settings
@@ -36,10 +37,21 @@ MATCH_CANDIDATE_LIMIT = 5
 # `.env` field either.
 CONTEXT_EVENT_LIMIT = 5
 
+# A separate, independently tunable constant for #29's entity-overlap
+# historical-candidate lookup (`find_entity_overlapping_events`) --
+# different call site than `MATCH_CANDIDATE_LIMIT`/`CONTEXT_EVENT_LIMIT`,
+# and, per `design.md` §14, not a `Settings`/`.env` field either.
+ENTITY_OVERLAP_LIMIT = 5
+
 
 class MatchCandidate(NamedTuple):
     event_id: uuid.UUID
     distance: float
+
+
+class EntityOverlapCandidate(NamedTuple):
+    event_id: uuid.UUID
+    shared_entities: list[str]
 
 
 async def find_candidate_events(
@@ -123,3 +135,55 @@ async def find_nearest_events(
     )
     result = await session.execute(query)
     return [MatchCandidate(event_id=row.id, distance=row.distance) for row in result]
+
+
+async def find_entity_overlapping_events(
+    session: AsyncSession,
+    event: Event,
+    *,
+    limit: int = ENTITY_OVERLAP_LIMIT,
+) -> list[EntityOverlapCandidate]:
+    """Find same-watch `event` rows (excluding `event` itself) whose
+    `entities` JSONB array shares at least one element with `event.entities`.
+
+    Sibling to `find_nearest_events`, built for #29's `relate_stage` as a
+    second, non-vector candidate source. `Event.entities` is `JSONB` (a
+    JSON array of strings), not a Postgres `ARRAY(Text)`, so the raw array
+    `&&` overlap operator does not apply -- this pushes the overlap test
+    down to SQL via JSONB's `?|` "any of these values exist as top-level
+    array elements" operator (`Event.entities.has_any(...)`), comparing
+    against `event.entities` cast to a Postgres `text[]`. A row qualifies
+    exactly when the Python-side intersection of the two entity sets would
+    be non-empty -- when `event.entities` is `[]`, `?|` against an empty
+    array matches nothing, so this returns `[]` without a special case.
+
+    `shared_entities` per candidate is `sorted(set(event.entities) &
+    set(candidate.entities))`, same determinism precedent as
+    `build_context_bundle`'s `shared_entities` (`score.py`). Results are
+    ordered by `len(shared_entities)` descending (most overlap first),
+    `Event.id` ascending as the tie-break (no distance metric applies
+    here) -- this ordering happens in Python, since the overlap count
+    itself is a Python-side computation over the filtered rows, not
+    something `?|` returns.
+
+    Returns at most `limit` results. Does not alter `find_candidate_events`'/
+    `find_nearest_events`' existing behavior.
+    """
+    entities_array = cast(event.entities, ARRAY(TEXT))
+    query = select(Event.id, Event.entities).where(
+        Event.watch_id == event.watch_id,
+        Event.id != event.id,
+        Event.entities.has_any(entities_array),
+    )
+    result = await session.execute(query)
+
+    own_entities = set(event.entities)
+    candidates = [
+        EntityOverlapCandidate(
+            event_id=row.id,
+            shared_entities=sorted(own_entities & set(row.entities)),
+        )
+        for row in result
+    ]
+    candidates.sort(key=lambda candidate: (-len(candidate.shared_entities), candidate.event_id))
+    return candidates[:limit]
