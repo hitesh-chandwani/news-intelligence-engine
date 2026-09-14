@@ -164,7 +164,7 @@ async def build_notification_payload(session: AsyncSession, event: Event) -> Not
             event_id=candidate_event.id,
             title=candidate_event.title,
             event_date=candidate_event.event_date,
-            relation=relation.relation,  # type: ignore[arg-type]
+            relation=relation.relation,
             rationale=relation.rationale,
         )
         for relation, candidate_event in related_events_result.all()
