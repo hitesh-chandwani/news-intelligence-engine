@@ -28,6 +28,7 @@ from nie.pipeline.adjudicate import adjudicate_stage
 from nie.pipeline.discover import discover_stage
 from nie.pipeline.embed import embed_stage
 from nie.pipeline.extract import extract_stage
+from nie.pipeline.synthesize import synthesize_stage
 from nie.pipeline.triage import triage_stage
 
 # Every stage is an async callable taking the run's single shared
@@ -47,16 +48,17 @@ async def _not_yet_implemented(session: AsyncSession) -> dict[str, int]:
 
 
 # The 10 stages from `design.md` §5, in pipeline order. `discover` (#19),
-# `extract` (#20), `triage` (#24), `embed` (#21), and `adjudicate` (#25)
-# are the first real stages; every other entry still maps to the shared
-# no-op placeholder, swapped out one at a time in later issues.
+# `extract` (#20), `triage` (#24), `embed` (#21), `adjudicate` (#25), and
+# `synthesize` (#26) are the first real stages; every other entry still
+# maps to the shared no-op placeholder, swapped out one at a time in
+# later issues.
 STAGE_REGISTRY: list[tuple[str, StageFn]] = [
     ("discover", discover_stage),
     ("extract", extract_stage),
     ("triage", triage_stage),
     ("embed", embed_stage),
     ("adjudicate", adjudicate_stage),
-    ("synthesize", _not_yet_implemented),
+    ("synthesize", synthesize_stage),
     ("score", _not_yet_implemented),
     ("relate", _not_yet_implemented),
     ("notify", _not_yet_implemented),
