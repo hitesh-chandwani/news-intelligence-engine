@@ -79,6 +79,19 @@ only that its stats have the expected shape; `tests/test_pipeline_score.py`
 owns score's actual business-logic coverage. Same "not in the issue's own
 Files: list, but wiring into STAGE_REGISTRY breaks this pre-existing
 end-to-end assertion otherwise" precedent as #24/#25/#26 above.
+
+`relate_stage` (#29) is now real too, same `LLMClient`-stubbing treatment
+as `score_stage`'s: `nie.pipeline.relate.LLMClient` is monkeypatched to a
+stub whose `call_structured` always returns an empty `RelationSet`
+(`relations=[]`, the simplest legal response -- no candidate `event_id`
+to satisfy), so this run makes no real LLM call and needs no API key.
+`relate_stage`'s own selection (`Event.relevance.isnot(None)` AND no
+existing outbound `event_relation` row) has no `watch_id` filter either,
+so -- like `score`'s -- this test doesn't assert its exact counts, only
+that its stats have the expected shape; `tests/test_pipeline_relate.py`
+owns relate's actual business-logic coverage. Same "not in the issue's
+own Files: list, but wiring into STAGE_REGISTRY breaks this pre-existing
+end-to-end assertion otherwise" precedent as #24/#25/#26/#28 above.
 """
 
 from collections.abc import AsyncIterator
@@ -92,10 +105,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from nie.db import create_engine, create_session_factory
 from nie.models import PipelineRun
 from nie.pipeline import adjudicate as adjudicate_module
+from nie.pipeline import relate as relate_module
 from nie.pipeline import score as score_module
 from nie.pipeline import synthesize as synthesize_module
 from nie.pipeline import triage as triage_module
 from nie.pipeline.adjudicate import AdjudicationResult
+from nie.pipeline.relate import RelationSet
 from nie.pipeline.runner import STAGE_REGISTRY, run_pipeline
 from nie.pipeline.score import ScoreResult
 from nie.pipeline.synthesize import EventRecord
@@ -211,6 +226,20 @@ class _StubScoreClient:
         )
 
 
+class _StubRelateClient:
+    """No-network stand-in for `LLMClient` -- always an empty `RelationSet`.
+
+    `relate_stage` only ever calls `call_structured`, so this stub
+    implements just that one method. `relations=[]` is the simplest legal
+    `RelationSet` -- no candidate `event_id` membership to satisfy.
+    """
+
+    async def call_structured(
+        self, messages: list[dict[str, str]], response_model: type[RelationSet]
+    ) -> RelationSet:
+        return response_model(relations=[])
+
+
 async def test_all_stages_running_end_to_end_produce_an_ok_run(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -246,6 +275,10 @@ async def test_all_stages_running_end_to_end_produce_an_ok_run(
     # constructs for itself (no `client` is passed through the registry)
     # so this run makes no real LLM call and needs no API key.
     monkeypatch.setattr(score_module, "LLMClient", lambda *args, **kwargs: _StubScoreClient())
+    # relate_stage (#29) is now real too -- stub the `LLMClient` it
+    # constructs for itself (no `client` is passed through the registry)
+    # so this run makes no real LLM call and needs no API key.
+    monkeypatch.setattr(relate_module, "LLMClient", lambda *args, **kwargs: _StubRelateClient())
     async with session_factory() as session:
         await seed(session)
 
@@ -310,6 +343,14 @@ async def test_all_stages_running_end_to_end_produce_an_ok_run(
         assert isinstance(run.stats["score"]["irrelevant"], int)
         assert isinstance(run.stats["score"]["scored"], int)
         assert isinstance(run.stats["score"]["skipped"], int)
+        # relate_stage (#29) is now real too, same shape-only treatment as
+        # score's above: its global selection (`Event.relevance.isnot(None)`
+        # AND no existing outbound `event_relation` row, no `watch_id`
+        # filter, by design) can pick up rows left behind by other test
+        # files sharing this never-truncated DB.
+        assert set(run.stats["relate"]) == {"related", "skipped"}
+        assert isinstance(run.stats["relate"]["related"], int)
+        assert isinstance(run.stats["relate"]["skipped"], int)
         for name, _ in STAGE_REGISTRY:
             if name not in (
                 "discover",
@@ -319,6 +360,7 @@ async def test_all_stages_running_end_to_end_produce_an_ok_run(
                 "adjudicate",
                 "synthesize",
                 "score",
+                "relate",
             ):
                 assert run.stats[name] == {}
 
