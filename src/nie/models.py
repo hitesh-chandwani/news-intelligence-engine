@@ -65,6 +65,27 @@ class Source(Base):
     per-watch, not global, so the same URL can be discovered by two
     different watches. ``embedding`` is populated later by #21 (local
     embeddings module + embed stage), not by this task.
+
+    ``adjudication_decision``/``adjudication_event_id``/
+    ``adjudication_materiality`` are added by #25 (adjudicate stage):
+    ``NULL`` until `adjudicate_stage` runs, then set together from the
+    LLM's structured verdict. ``adjudication_decision`` is plain ``text``
+    + `CheckConstraint`, same pattern as every other status/verdict column
+    in this module. ``adjudication_event_id`` is only ever set when
+    ``adjudication_decision = 'existing'`` (enforced in application code,
+    not a DB constraint -- same precedent as `Event.event_id`-shaped
+    cross-column invariants elsewhere in this schema being left to
+    Pydantic/application logic rather than a `CheckConstraint`).
+    ``adjudication_materiality`` is plain ``text`` + `CheckConstraint`;
+    Postgres ``IN (...)`` passes ``NULL`` through automatically, same
+    precedent as `Event.relevance`/`importance` being nullable + checked,
+    so no extra ``OR ... IS NULL`` clause is needed. ``status``'s
+    `CheckConstraint` gains ``'adjudicated'`` -- "adjudication decision
+    recorded, awaiting synthesis" (#26's input state); this also closes
+    the re-triage/re-embed/re-adjudicate loop #24's grooming flagged,
+    since every processed source now moves off `status="extracted"`
+    (either straight to `"processed"` for a `noise` verdict, or to
+    `"adjudicated"` for `new`/`existing`).
     """
 
     __tablename__ = "source"
@@ -72,8 +93,16 @@ class Source(Base):
         UniqueConstraint("watch_id", "url", name="uq_source_watch_id_url"),
         CheckConstraint(
             "status IN ('discovered', 'extracted', 'extract_failed', "
-            "'triaged_out', 'processed')",
+            "'triaged_out', 'processed', 'adjudicated')",
             name="ck_source_status",
+        ),
+        CheckConstraint(
+            "adjudication_decision IN ('new', 'existing', 'noise')",
+            name="ck_source_adjudication_decision",
+        ),
+        CheckConstraint(
+            "adjudication_materiality IN ('none', 'minor', 'material')",
+            name="ck_source_adjudication_materiality",
         ),
     )
 
@@ -92,6 +121,11 @@ class Source(Base):
     embedding: Mapped[list[float] | None] = mapped_column(Vector(384))
     status: Mapped[str] = mapped_column(Text, nullable=False)
     triage_note: Mapped[str | None] = mapped_column(Text)
+    adjudication_decision: Mapped[str | None] = mapped_column(Text)
+    adjudication_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("event.id")
+    )
+    adjudication_materiality: Mapped[str | None] = mapped_column(Text)
 
 
 class Category(Base):
