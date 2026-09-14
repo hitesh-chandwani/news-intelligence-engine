@@ -49,6 +49,23 @@ candidate `event_id` membership to satisfy), so this run makes no real
 LLM call and needs no API key. Same shape-only treatment as `triage`'s:
 `adjudicate_stage`'s selection has no `watch_id` filter either, so its
 exact counts aren't asserted here.
+
+`synthesize_stage` (#26) is now real too, same `LLMClient`-stubbing
+treatment as `triage_stage`'s/`adjudicate_stage`'s:
+`nie.pipeline.synthesize.LLMClient` is monkeypatched to a stub whose
+`call_structured` always returns a legal `EventRecord` (`categories =
+["other"]`, guaranteed to exist since #14's `seed()` call below seeds
+the category table too), so this run makes no real LLM call and needs
+no API key. `synthesize_stage`'s own selection (`status ==
+"adjudicated"`) has no `watch_id` filter either, so -- like
+`triage`/`adjudicate` -- this test doesn't assert its exact counts, only
+that its stats have the expected shape; `tests/
+test_pipeline_synthesize.py` owns synthesize's actual business-logic
+coverage. Note this test file isn't in issue #26's own "Files:"
+constraint list, but wiring the real stage into `STAGE_REGISTRY` (the
+issue's own acceptance criteria) breaks this pre-existing end-to-end
+assertion otherwise, exactly as #24/#25 already needed the same
+treatment here -- same precedent, not a new one.
 """
 
 from collections.abc import AsyncIterator
@@ -62,9 +79,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from nie.db import create_engine, create_session_factory
 from nie.models import PipelineRun
 from nie.pipeline import adjudicate as adjudicate_module
+from nie.pipeline import synthesize as synthesize_module
 from nie.pipeline import triage as triage_module
 from nie.pipeline.adjudicate import AdjudicationResult
 from nie.pipeline.runner import STAGE_REGISTRY, run_pipeline
+from nie.pipeline.synthesize import EventRecord
 from nie.pipeline.triage import TriageResult
 from nie.seed.run import seed
 from nie.sources import extract_trafilatura
@@ -133,6 +152,28 @@ class _StubAdjudicateClient:
         return response_model(decision="noise", event_id=None, materiality="none")
 
 
+class _StubSynthesizeClient:
+    """No-network stand-in for `LLMClient` -- always a legal `EventRecord`.
+
+    `synthesize_stage` only ever calls `call_structured`, so this stub
+    implements just that one method. `categories = ["other"]` is
+    guaranteed to validate against the seeded category table (#14's
+    `seed()` call below seeds it).
+    """
+
+    async def call_structured(
+        self, messages: list[dict[str, str]], response_model: type[EventRecord]
+    ) -> EventRecord:
+        return response_model(
+            title="Stub Event",
+            fact_summary="Stub fact summary.",
+            interpretation="Stub interpretation.",
+            event_date=None,
+            entities=[],
+            categories=["other"],
+        )
+
+
 async def test_all_stages_running_end_to_end_produce_an_ok_run(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -157,6 +198,12 @@ async def test_all_stages_running_end_to_end_produce_an_ok_run(
     # so this run makes no real LLM call and needs no API key.
     monkeypatch.setattr(
         adjudicate_module, "LLMClient", lambda *args, **kwargs: _StubAdjudicateClient()
+    )
+    # synthesize_stage (#26) is now real too -- stub the `LLMClient` it
+    # constructs for itself (no `client` is passed through the registry)
+    # so this run makes no real LLM call and needs no API key.
+    monkeypatch.setattr(
+        synthesize_module, "LLMClient", lambda *args, **kwargs: _StubSynthesizeClient()
     )
     async with session_factory() as session:
         await seed(session)
@@ -200,8 +247,29 @@ async def test_all_stages_running_end_to_end_produce_an_ok_run(
         assert isinstance(run.stats["adjudicate"]["existing"], int)
         assert isinstance(run.stats["adjudicate"]["noise"], int)
         assert isinstance(run.stats["adjudicate"]["skipped"], int)
+        # synthesize_stage (#26) is now real too, same shape-only treatment
+        # as adjudicate's above: its global `status == "adjudicated"`
+        # selection (no `watch_id` filter, by design) can pick up rows
+        # left behind by other test files sharing this never-truncated DB.
+        assert set(run.stats["synthesize"]) == {
+            "new",
+            "existing_updated",
+            "existing_linked",
+            "skipped",
+        }
+        assert isinstance(run.stats["synthesize"]["new"], int)
+        assert isinstance(run.stats["synthesize"]["existing_updated"], int)
+        assert isinstance(run.stats["synthesize"]["existing_linked"], int)
+        assert isinstance(run.stats["synthesize"]["skipped"], int)
         for name, _ in STAGE_REGISTRY:
-            if name not in ("discover", "extract", "triage", "embed", "adjudicate"):
+            if name not in (
+                "discover",
+                "extract",
+                "triage",
+                "embed",
+                "adjudicate",
+                "synthesize",
+            ):
                 assert run.stats[name] == {}
 
 
