@@ -18,8 +18,10 @@ not raise.
 
 from __future__ import annotations
 
+import resend
 from jinja2 import Environment
 
+from nie.config import Settings
 from nie.pipeline.notify import NotificationPayload
 
 # `design.md` §14's config table has no NOTIFY_EMAIL_FROM/equivalent
@@ -113,3 +115,58 @@ def render_email(payload: NotificationPayload) -> str:
     field (`event_date`/`published_at`) is `None`.
     """
     return _TEMPLATE.render(payload=payload)
+
+
+class EmailSendError(Exception):
+    """Raised by `send_email` on missing config or a failed Resend send.
+
+    Covers both "can't attempt the send" (`settings.resend_api_key` or
+    `settings.notify_email_to` is `None`) and "attempted and failed"
+    (the Resend SDK call itself raised) -- callers (#48's notify stage)
+    only need to catch this one exception class to decide `"email"`
+    stays out of `Notification.channels_sent`, the same
+    one-exception-type-to-catch pattern `nie.sources.base.ExtractionError`
+    sets for `extract_stage` (`src/nie/pipeline/extract.py`).
+    """
+
+
+async def send_email(payload: NotificationPayload, settings: Settings | None = None) -> None:
+    """Render `payload` and send it through the Resend API.
+
+    Mirrors `LLMClient.__init__`'s `settings: Settings | None = None`
+    pattern (`src/nie/llm/client.py`): `settings` defaults to
+    `Settings()` when omitted.
+
+    Raises `EmailSendError` -- never a bare/unwrapped exception -- when
+    `settings.resend_api_key` or `settings.notify_email_to` is `None`,
+    and when the Resend SDK call itself fails (network error, non-2xx/
+    error response); the underlying exception is chained via `from` so
+    it isn't lost. Returns `None` on a confirmed-accepted send and
+    raises nothing.
+    """
+    settings = settings if settings is not None else Settings()
+
+    if not settings.resend_api_key:
+        raise EmailSendError("Settings().resend_api_key is not set -- required to send email.")
+    if not settings.notify_email_to:
+        raise EmailSendError("Settings().notify_email_to is not set -- required to send email.")
+
+    html = render_email(payload)
+
+    # The Resend SDK authenticates via this module-level attribute rather
+    # than a per-call argument, so it's set here, right before the call,
+    # keeping this function the one place that reads
+    # `settings.resend_api_key`.
+    resend.api_key = settings.resend_api_key
+
+    try:
+        await resend.Emails.send_async(
+            {
+                "from": _FROM_ADDRESS,
+                "to": settings.notify_email_to,
+                "subject": payload.title,
+                "html": html,
+            }
+        )
+    except Exception as exc:
+        raise EmailSendError(f"Resend send failed: {exc}") from exc
