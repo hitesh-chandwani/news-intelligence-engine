@@ -7,10 +7,10 @@ test (`nie.db.create_engine`/`create_session_factory`), not the
 module-level singleton, so pooled asyncpg connections stay bound to this
 test's own event loop.
 
-`discover` (#19), `extract` (#20), and `embed` (#21) are the first
-`STAGE_REGISTRY` entries to become real stages rather than the shared
-no-op placeholder -- this module's own docstring anticipated exactly
-this ("each replacing its own `STAGE_REGISTRY` entry").
+`discover` (#19), `extract` (#20), `triage` (#24), and `embed` (#21) are
+the first `STAGE_REGISTRY` entries to become real stages rather than the
+shared no-op placeholder -- this module's own docstring anticipated
+exactly this ("each replacing its own `STAGE_REGISTRY` entry").
 `test_all_stages_running_end_to_end_produce_an_ok_run` below isolates
 env and seeds the Silver watch so the real `discover_stage` succeeds
 without a network call, and only asserts that it *succeeded* (a
@@ -28,6 +28,18 @@ real too (#21), gets the same shape-only treatment: its selection has no
 `watch_id` filter either, so rows left behind by other test files
 sharing this never-truncated DB can make its exact count non-
 deterministic here.
+
+`triage_stage` (#24) is now real too, and unlike `discover`/`extract`/
+`embed` it needs an `LLMClient` -- `run_pipeline` calls every
+`STAGE_REGISTRY` entry as `stage_fn(session)` (no way to pass a
+per-stage `client` through the registry), so this test monkeypatches
+`nie.pipeline.triage.LLMClient` itself (the name that module imports
+and constructs when `triage_stage`'s own `client` param is left `None`,
+exactly as it is via the registry) to a stub whose `call_structured`
+always returns a positive verdict, with no real network call/API key --
+per `_docs/testing-guidelines.md`. Same shape-only treatment as
+`embed`'s: `triage_stage`'s selection has no `watch_id` filter either, so
+its exact counts aren't asserted here.
 """
 
 from collections.abc import AsyncIterator
@@ -40,7 +52,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nie.db import create_engine, create_session_factory
 from nie.models import PipelineRun
+from nie.pipeline import triage as triage_module
 from nie.pipeline.runner import STAGE_REGISTRY, run_pipeline
+from nie.pipeline.triage import TriageResult
 from nie.seed.run import seed
 from nie.sources import extract_trafilatura
 
@@ -78,6 +92,20 @@ async def _raising_stage(session: AsyncSession) -> dict[str, int]:
     raise ValueError("boom")
 
 
+class _StubTriageClient:
+    """No-network stand-in for `LLMClient` -- always a positive verdict.
+
+    `triage_stage` only ever calls `call_structured`, so this stub
+    implements just that one method rather than the full `LLMClient`
+    surface.
+    """
+
+    async def call_structured(
+        self, messages: list[dict[str, str]], response_model: type[TriageResult]
+    ) -> TriageResult:
+        return response_model(plausible=True, note="stub triage verdict")
+
+
 async def test_all_stages_running_end_to_end_produce_an_ok_run(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -93,6 +121,10 @@ async def test_all_stages_running_end_to_end_produce_an_ok_run(
     # a failed extraction (status="extract_failed") is still a fully
     # valid, non-erroring stage result.
     monkeypatch.setattr(extract_trafilatura.trafilatura, "fetch_url", lambda url: None)
+    # triage_stage (#24) is now real too -- stub the `LLMClient` it
+    # constructs for itself (no `client` is passed through the registry)
+    # so this run makes no real LLM call and needs no API key.
+    monkeypatch.setattr(triage_module, "LLMClient", lambda *args, **kwargs: _StubTriageClient())
     async with session_factory() as session:
         await seed(session)
 
@@ -117,8 +149,16 @@ async def test_all_stages_running_end_to_end_produce_an_ok_run(
         # shape of its stats is asserted here, not an exact count.
         assert set(run.stats["embed"]) == {"embedded"}
         assert isinstance(run.stats["embed"]["embedded"], int)
+        # triage_stage (#24) is now real too, same shape-only treatment as
+        # embed's above: its global `status == "extracted"` selection (no
+        # `watch_id` filter, by design) can pick up rows left behind by
+        # other test files sharing this never-truncated DB.
+        assert set(run.stats["triage"]) == {"triaged_out", "kept", "skipped"}
+        assert isinstance(run.stats["triage"]["triaged_out"], int)
+        assert isinstance(run.stats["triage"]["kept"], int)
+        assert isinstance(run.stats["triage"]["skipped"], int)
         for name, _ in STAGE_REGISTRY:
-            if name not in ("discover", "extract", "embed"):
+            if name not in ("discover", "extract", "triage", "embed"):
                 assert run.stats[name] == {}
 
 
