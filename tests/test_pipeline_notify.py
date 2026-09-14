@@ -250,10 +250,19 @@ async def test_build_notification_payload_assembles_every_field_in_order(
         )
         market, price = sorted(categories_result.scalars(), key=lambda c: c.slug)
 
-        candidate_event = _make_scored_event(
-            watch.id, title="Historical Candidate", event_date=now - timedelta(days=3)
+        # Three distinct candidates -- different `event_date`s (including a
+        # null one) so the `related_events` ORDER BY (event_date desc nulls
+        # last, to_event_id asc) is genuinely exercised below, not tied.
+        candidate_recent = _make_scored_event(
+            watch.id, title="Recent Candidate", event_date=now - timedelta(days=1)
         )
-        session.add(candidate_event)
+        candidate_old = _make_scored_event(
+            watch.id, title="Older Candidate", event_date=now - timedelta(days=3)
+        )
+        candidate_undated = _make_scored_event(
+            watch.id, title="Undated Candidate", event_date=None
+        )
+        session.add_all([candidate_recent, candidate_old, candidate_undated])
         await session.commit()
 
         event = _make_scored_event(watch.id, title="Main Event", event_date=now)
@@ -287,15 +296,21 @@ async def test_build_notification_payload_assembles_every_field_in_order(
                 EventSource(event_id=event.id, source_id=source_b.id),
                 EventRelation(
                     from_event_id=event.id,
-                    to_event_id=candidate_event.id,
+                    to_event_id=candidate_old.id,
                     relation="precedes",
                     rationale="First relation rationale.",
                 ),
                 EventRelation(
                     from_event_id=event.id,
-                    to_event_id=candidate_event.id,
+                    to_event_id=candidate_recent.id,
                     relation="similar",
                     rationale="Second relation rationale.",
+                ),
+                EventRelation(
+                    from_event_id=event.id,
+                    to_event_id=candidate_undated.id,
+                    relation="context-for",
+                    rationale="Third relation rationale.",
                 ),
             ]
         )
@@ -325,21 +340,84 @@ async def test_build_notification_payload_assembles_every_field_in_order(
     assert payload.sources[1].source_name == "Example Times"
     assert payload.sources[1].published_at is None
 
-    # related_events: both outbound relations target the same single
-    # candidate event, so `event_date`/`to_event_id` -- the two specified
-    # sort keys -- tie between them; no third sort key is specified, so
-    # order between these two rows is not asserted, only that both are
-    # present with their own relation/rationale correctly paired.
-    assert len(payload.related_events) == 2
-    for related in payload.related_events:
-        assert related.event_id == candidate_event.id
-        assert related.title == "Historical Candidate"
-        assert related.event_date == candidate_event.event_date
-    relation_pairs = {(r.relation, r.rationale) for r in payload.related_events}
-    assert relation_pairs == {
-        ("precedes", "First relation rationale."),
-        ("similar", "Second relation rationale."),
-    }
+    # related_events: three distinct candidates with distinct `event_date`s
+    # (one null) genuinely exercise the ORDER BY -- event_date descending,
+    # NULLS LAST: candidate_recent (now - 1d) first, candidate_old
+    # (now - 3d) second, candidate_undated (null) last.
+    assert len(payload.related_events) == 3
+    assert [r.title for r in payload.related_events] == [
+        "Recent Candidate",
+        "Older Candidate",
+        "Undated Candidate",
+    ]
+    assert [r.event_id for r in payload.related_events] == [
+        candidate_recent.id,
+        candidate_old.id,
+        candidate_undated.id,
+    ]
+    assert [r.event_date for r in payload.related_events] == [
+        candidate_recent.event_date,
+        candidate_old.event_date,
+        candidate_undated.event_date,
+    ]
+    assert [r.relation for r in payload.related_events] == [
+        "similar",
+        "precedes",
+        "context-for",
+    ]
+    assert [r.rationale for r in payload.related_events] == [
+        "Second relation rationale.",
+        "First relation rationale.",
+        "Third relation rationale.",
+    ]
+
+
+async def test_build_notification_payload_related_events_tie_broken_by_to_event_id(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Two outbound relations whose candidates share the same `event_date`
+    must fall back to the second sort key, `to_event_id` ascending -- the
+    tie-break the main ordering test above can't exercise since all three
+    of its candidates have distinct `event_date`s."""
+    now = datetime.now(UTC)
+
+    async with session_factory() as session:
+        watch = await _make_watch(session)
+
+        candidate_x = _make_scored_event(watch.id, title="Candidate X", event_date=now)
+        candidate_y = _make_scored_event(watch.id, title="Candidate Y", event_date=now)
+        session.add_all([candidate_x, candidate_y])
+        await session.commit()
+
+        # `id`s are random UUIDs assigned on flush -- sort at runtime rather
+        # than assuming which of the two sorts first.
+        first, second = sorted([candidate_x, candidate_y], key=lambda c: c.id)
+
+        event = _make_scored_event(watch.id, title="Main Event", event_date=now)
+        session.add(event)
+        await session.commit()
+
+        session.add_all(
+            [
+                EventRelation(
+                    from_event_id=event.id,
+                    to_event_id=candidate_y.id,
+                    relation="similar",
+                    rationale="Y rationale.",
+                ),
+                EventRelation(
+                    from_event_id=event.id,
+                    to_event_id=candidate_x.id,
+                    relation="precedes",
+                    rationale="X rationale.",
+                ),
+            ]
+        )
+        await session.commit()
+
+        payload = await build_notification_payload(session, event)
+
+    assert [r.event_id for r in payload.related_events] == [first.id, second.id]
 
 
 async def test_build_notification_payload_empty_related_events_when_no_relations(
