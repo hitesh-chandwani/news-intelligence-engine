@@ -40,6 +40,15 @@ always returns a positive verdict, with no real network call/API key --
 per `_docs/testing-guidelines.md`. Same shape-only treatment as
 `embed`'s: `triage_stage`'s selection has no `watch_id` filter either, so
 its exact counts aren't asserted here.
+
+`adjudicate_stage` (#25) is now real too, same `LLMClient`-stubbing
+treatment as `triage_stage`'s: `nie.pipeline.adjudicate.LLMClient` is
+monkeypatched to a stub whose `call_structured` always returns a
+`"noise"` verdict (the simplest legal `AdjudicationResult` -- no
+candidate `event_id` membership to satisfy), so this run makes no real
+LLM call and needs no API key. Same shape-only treatment as `triage`'s:
+`adjudicate_stage`'s selection has no `watch_id` filter either, so its
+exact counts aren't asserted here.
 """
 
 from collections.abc import AsyncIterator
@@ -52,7 +61,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nie.db import create_engine, create_session_factory
 from nie.models import PipelineRun
+from nie.pipeline import adjudicate as adjudicate_module
 from nie.pipeline import triage as triage_module
+from nie.pipeline.adjudicate import AdjudicationResult
 from nie.pipeline.runner import STAGE_REGISTRY, run_pipeline
 from nie.pipeline.triage import TriageResult
 from nie.seed.run import seed
@@ -106,6 +117,22 @@ class _StubTriageClient:
         return response_model(plausible=True, note="stub triage verdict")
 
 
+class _StubAdjudicateClient:
+    """No-network stand-in for `LLMClient` -- always a `"noise"` verdict.
+
+    `adjudicate_stage` only ever calls `call_structured`, so this stub
+    implements just that one method. `"noise"` is the simplest legal
+    `AdjudicationResult` -- unlike `"existing"`, it needs no candidate
+    `event_id` to satisfy the membership check `adjudicate_stage` runs
+    itself.
+    """
+
+    async def call_structured(
+        self, messages: list[dict[str, str]], response_model: type[AdjudicationResult]
+    ) -> AdjudicationResult:
+        return response_model(decision="noise", event_id=None, materiality="none")
+
+
 async def test_all_stages_running_end_to_end_produce_an_ok_run(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -125,6 +152,12 @@ async def test_all_stages_running_end_to_end_produce_an_ok_run(
     # constructs for itself (no `client` is passed through the registry)
     # so this run makes no real LLM call and needs no API key.
     monkeypatch.setattr(triage_module, "LLMClient", lambda *args, **kwargs: _StubTriageClient())
+    # adjudicate_stage (#25) is now real too -- stub the `LLMClient` it
+    # constructs for itself (no `client` is passed through the registry)
+    # so this run makes no real LLM call and needs no API key.
+    monkeypatch.setattr(
+        adjudicate_module, "LLMClient", lambda *args, **kwargs: _StubAdjudicateClient()
+    )
     async with session_factory() as session:
         await seed(session)
 
@@ -157,8 +190,18 @@ async def test_all_stages_running_end_to_end_produce_an_ok_run(
         assert isinstance(run.stats["triage"]["triaged_out"], int)
         assert isinstance(run.stats["triage"]["kept"], int)
         assert isinstance(run.stats["triage"]["skipped"], int)
+        # adjudicate_stage (#25) is now real too, same shape-only treatment
+        # as triage's above: its global `status == "extracted" AND
+        # embedding IS NOT NULL` selection (no `watch_id` filter, by
+        # design) can pick up rows left behind by other test files sharing
+        # this never-truncated DB.
+        assert set(run.stats["adjudicate"]) == {"new", "existing", "noise", "skipped"}
+        assert isinstance(run.stats["adjudicate"]["new"], int)
+        assert isinstance(run.stats["adjudicate"]["existing"], int)
+        assert isinstance(run.stats["adjudicate"]["noise"], int)
+        assert isinstance(run.stats["adjudicate"]["skipped"], int)
         for name, _ in STAGE_REGISTRY:
-            if name not in ("discover", "extract", "triage", "embed"):
+            if name not in ("discover", "extract", "triage", "embed", "adjudicate"):
                 assert run.stats[name] == {}
 
 
