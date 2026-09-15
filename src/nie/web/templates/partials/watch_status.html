@@ -1,0 +1,12 @@
+<div id="watch-status">
+  <p>Status: <strong>{{ watch.status }}</strong></p>
+  {% if watch.status == "enabled" %}
+  <button hx-post="/watch/disable" hx-target="#watch-status" hx-swap="outerHTML">
+    Disable
+  </button>
+  {% else %}
+  <button hx-post="/watch/enable" hx-target="#watch-status" hx-swap="outerHTML">
+    Enable
+  </button>
+  {% endif %}
+</div>

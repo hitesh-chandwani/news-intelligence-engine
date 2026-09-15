@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+
+{% block title %}Watch — News Intelligence Engine{% endblock %}
+
+{% block content %}
+  <h1>{{ watch.slug }}</h1>
+  {% include "partials/watch_status.html" %}
+{% endblock %}
