@@ -13,13 +13,16 @@ module-level FastAPI singleton some frameworks use) with
 ASGITransport(app=app))` -- no real server process, per issue #34's test
 spec.
 
-The 404 test deletes the Silver watch row within one `AsyncSession`
-transaction and never commits it: the delete is visible to that same
-session (and so to the app, since `get_session` is overridden to hand out
-sessions from this test's factory), but is rolled back when the session
-closes at the end of the test, so no other test in the suite -- run in any
-order, against the same live database -- ever observes a missing Silver
-watch.
+The 404 test never deletes the real Silver watch row -- this repo's test
+DB is a shared, never-truncated Compose Postgres instance, and Postgres
+enforces the FK constraint from `context_item.watch_id` (and others) at
+`DELETE` time, not commit time, so an uncommitted-then-rolled-back delete
+still fails before it gets anywhere near the rollback. Instead, the test
+monkeypatches `nie.web.routers.watch.SILVER_WATCH_SLUG` (the module-level
+constant `_get_silver_watch` queries by) to a slug that provably doesn't
+exist in the DB, so the router's real, unmodified query against the real
+`watch` table legitimately returns no row -- no row in the shared DB is
+ever touched, deleted, or left in a bad state for other tests.
 """
 
 from collections.abc import AsyncIterator
@@ -29,16 +32,35 @@ import pytest
 from alembic.command import upgrade
 from alembic.config import Config
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nie.db import create_engine, create_session_factory
-from nie.models import Watch
 from nie.seed.run import SILVER_WATCH_SLUG, seed
 from nie.web.app import create_app
 from nie.web.deps import get_session
+from nie.web.routers import watch as watch_router
 
 REPO_ROOT = Path(__file__).parent.parent
+
+# Field names of `nie.schemas.PipelineRunSummary`, as serialized in
+# `WatchStatusResponse.last_run` -- used by
+# `test_enable_status_disable_status_transitions` to check that a non-None
+# `last_run` is well-formed, without asserting on `pipeline_run` row
+# history in the shared test DB.
+_PIPELINE_RUN_SUMMARY_FIELDS = {
+    "id",
+    "trigger",
+    "status",
+    "started_at",
+    "finished_at",
+    "stats",
+    "error",
+}
+
+
+def _is_pipeline_run_summary_shaped(value: object) -> bool:
+    """`True` if `value` is a dict with exactly `PipelineRunSummary`'s keys."""
+    return isinstance(value, dict) and value.keys() == _PIPELINE_RUN_SUMMARY_FIELDS
 
 
 @pytest.fixture
@@ -106,8 +128,13 @@ async def test_enable_status_disable_status_transitions(seeded_client: AsyncClie
     assert status_response.status_code == 200
     assert status_response.json()["status"] == "enabled"
     assert status_response.json()["slug"] == SILVER_WATCH_SLUG
-    # No pipeline_run rows exist in a freshly-seeded DB.
-    assert status_response.json()["last_run"] is None
+    # This repo's test DB is shared and never truncated, so other test
+    # modules may have already created `pipeline_run` rows before this
+    # test runs -- don't assume a pristine DB with zero rows. Either
+    # `last_run` is `None` (no pipeline has ever run) or it's a
+    # well-formed `PipelineRunSummary` dict; both are valid.
+    last_run = status_response.json()["last_run"]
+    assert last_run is None or _is_pipeline_run_summary_shaped(last_run)
 
     disable_response = await seeded_client.post("/watch/disable")
     assert disable_response.status_code == 200
@@ -174,47 +201,45 @@ async def test_plain_request_gets_json(seeded_client: AsyncClient) -> None:
     ],
 )
 async def test_missing_silver_watch_returns_404(
-    session_factory: async_sessionmaker[AsyncSession], method: str, url: str
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    url: str,
 ) -> None:
     """All three endpoints return `404` with a JSON `{"detail": ...}` body
     when the Silver watch row does not exist.
 
-    The watch row is deleted within one `AsyncSession` transaction that is
-    never committed: the delete is rolled back when the session closes, so
-    no other test ever observes a missing Silver watch. The app's
-    `get_session` override hands out sessions from that same
-    `session_factory`, each wrapping its own connection/transaction, so the
-    uncommitted delete is visible to the app's requests for the lifetime of
-    this `async with` block.
+    This repo's test DB is a shared, never-truncated Compose Postgres
+    instance -- actually deleting the real Silver watch row is not an
+    option: Postgres enforces the FK constraint from
+    `context_item.watch_id` (and others) at `DELETE` time, not commit
+    time, so even an uncommitted, later-rolled-back delete raises a real
+    `IntegrityError` before rollback ever comes into play.
+
+    Instead, this monkeypatches `nie.web.routers.watch.SILVER_WATCH_SLUG`
+    -- the module-level constant `_get_silver_watch` queries `Watch.slug`
+    by -- to a slug that provably doesn't exist in the DB. The router's
+    query then runs unmodified against the real `watch` table and
+    legitimately finds no row, so no row anywhere in the shared DB is
+    touched, deleted, or left in a bad state for other tests.
     """
+    monkeypatch.setattr(watch_router, "SILVER_WATCH_SLUG", "nonexistent-watch-slug-for-404-test")
+
     async with session_factory() as session:
         await seed(session)
 
-        watch_result = await session.execute(select(Watch).where(Watch.slug == SILVER_WATCH_SLUG))
-        watch = watch_result.scalar_one()
-        await session.delete(watch)
-        await session.flush()
-        # Deliberately no `await session.commit()` here -- see docstring.
+    app = create_app()
 
-        app = create_app()
-
-        async def _override_get_session() -> AsyncIterator[AsyncSession]:
+    async def _override_get_session() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
             yield session
 
-        app.dependency_overrides[get_session] = _override_get_session
+    app.dependency_overrides[get_session] = _override_get_session
 
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
-            response = await client.request(method, url)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.request(method, url)
 
-        assert response.status_code == 404
-        assert "detail" in response.json()
-
-    # Sanity check: a fresh session (own transaction) still sees the
-    # Silver watch, confirming the delete above was never committed.
-    async with session_factory() as verify_session:
-        result = await verify_session.execute(
-            select(Watch).where(Watch.slug == SILVER_WATCH_SLUG)
-        )
-        assert result.scalar_one_or_none() is not None
+    assert response.status_code == 404
+    assert "detail" in response.json()
