@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -199,3 +199,76 @@ class PreferenceUpdate(BaseModel):
             if invalid:
                 raise ValueError(f"channels entries must be one of {sorted(_CHANNEL_VALUES)}")
         return value
+
+
+class EventSummary(BaseModel):
+    """One row of `GET /events` (issue #37): the subset of
+    `nie.models.Event` needed for a timeline row, plus its category slugs
+    (via `EventCategory`/`Category`) -- same "slug list, no join object"
+    convention `PreferenceResponse.categories` (#36) set. Does not include
+    `fact_summary`/`interpretation`/`entities`/`sources`/`related_events` --
+    those are `EventDetail`-only, fetched via `GET /events/{id}`.
+    """
+
+    id: uuid.UUID
+    title: str
+    event_date: datetime | None
+    discovered_at: datetime
+    relevance: str | None
+    importance: str | None
+    impact_direction: str | None
+    impact_confidence: str | None
+    categories: list[str]
+
+
+class EventSourceRef(BaseModel):
+    """One `nie.models.Source` linked to an event via `EventSource`, as
+    embedded in `EventDetail.sources` (issue #37). Carries `url` so the UI
+    can link out to the original article (FR-022).
+    """
+
+    id: uuid.UUID
+    url: str
+    title: str
+    source_name: str
+    published_at: datetime | None
+
+
+class RelatedEventRef(BaseModel):
+    """One `nie.models.EventRelation` row joined to the *other* event's
+    `title` (issue #37), as embedded in `EventDetail.related_events`.
+
+    `direction="outgoing"` when the event being described is
+    `from_event_id` (e.g. `relation="precedes"` reads "this event precedes
+    `title`"); `direction="incoming"` when it is `to_event_id` (reads
+    "`title` precedes this event").
+    """
+
+    event_id: uuid.UUID
+    title: str
+    relation: str
+    direction: Literal["outgoing", "incoming"]
+
+
+class EventDetail(BaseModel):
+    """Full response body for `GET /events/{id}` (issue #37): every column
+    of a `nie.models.Event` row (`fact_summary`/`interpretation` kept as
+    distinct fields, per FR-016), plus its category slugs, linked sources,
+    and related events in both relation directions.
+    """
+
+    id: uuid.UUID
+    title: str
+    fact_summary: str
+    interpretation: str
+    event_date: datetime | None
+    discovered_at: datetime
+    relevance: str | None
+    importance: str | None
+    impact_direction: str | None
+    impact_reason: str | None
+    impact_confidence: str | None
+    entities: list[str]
+    categories: list[str]
+    sources: list[EventSourceRef]
+    related_events: list[RelatedEventRef]
