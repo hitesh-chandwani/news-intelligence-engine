@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+
+{% block title %}Events — News Intelligence Engine{% endblock %}
+
+{% block content %}
+  <h1>Event timeline</h1>
+
+  <form
+    hx-get="/events"
+    hx-target="#event-list"
+    hx-swap="outerHTML"
+    hx-push-url="true"
+  >
+    <label>
+      Importance
+      <select name="importance">
+        <option value="" {% if not filters.importance %}selected{% endif %}>Any</option>
+        {% for value in ["low", "medium", "high", "critical"] %}
+        <option value="{{ value }}" {% if filters.importance == value %}selected{% endif %}>
+          {{ value }}
+        </option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>
+      Relevance
+      <select name="relevance">
+        <option value="" {% if not filters.relevance %}selected{% endif %}>Any</option>
+        {% for value in ["irrelevant", "low", "medium", "high"] %}
+        <option value="{{ value }}" {% if filters.relevance == value %}selected{% endif %}>
+          {{ value }}
+        </option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>
+      Categories
+      <select name="category" multiple>
+        {% for category in categories %}
+        <option value="{{ category.slug }}" {% if category.slug in filters.category %}selected{% endif %}>
+          {{ category.name }}
+        </option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>
+      From
+      <input
+        type="date"
+        name="date_from"
+        value="{{ filters.date_from.date() if filters.date_from else '' }}"
+      />
+    </label>
+
+    <label>
+      To
+      <input
+        type="date"
+        name="date_to"
+        value="{{ filters.date_to.date() if filters.date_to else '' }}"
+      />
+    </label>
+
+    <button type="submit">Filter</button>
+  </form>
+
+  {% include "partials/event_list.html" %}
+{% endblock %}

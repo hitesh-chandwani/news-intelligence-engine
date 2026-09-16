@@ -1,0 +1,71 @@
+<div id="event-detail">
+  <h2>{{ event.title }}</h2>
+  <p>
+    {% if event.event_date %}{{ event.event_date }}{% else %}Date unknown{% endif %}
+    &mdash; discovered {{ event.discovered_at }}
+  </p>
+
+  <p>
+    {% for category in event.categories %}
+    <span>{{ category }}</span>
+    {% else %}
+    <span>No categories</span>
+    {% endfor %}
+  </p>
+
+  <section style="background-color: #eef6ff; border-left: 4px solid #3388ff; padding: 0.5rem 1rem;">
+    <h3>Fact</h3>
+    <p>{{ event.fact_summary }}</p>
+  </section>
+
+  <section style="background-color: #fff6e6; border-left: 4px solid #cc8800; padding: 0.5rem 1rem;">
+    <h3>Interpretation</h3>
+    <p>{{ event.interpretation }}</p>
+  </section>
+
+  <section>
+    <h3>Impact</h3>
+    <p>
+      Direction: {{ event.impact_direction or "unscored" }}
+      &mdash; Confidence: {{ event.impact_confidence or "unscored" }}
+    </p>
+    {% if event.impact_reason %}
+    <p>{{ event.impact_reason }}</p>
+    {% endif %}
+  </section>
+
+  <section>
+    <h3>Sources</h3>
+    <ul>
+      {% for source in event.sources %}
+      <li>
+        <a href="{{ source.url }}" target="_blank" rel="noopener noreferrer">{{ source.title }}</a>
+        &mdash; {{ source.source_name }}
+        {% if source.published_at %}({{ source.published_at }}){% endif %}
+      </li>
+      {% else %}
+      <li>No linked sources.</li>
+      {% endfor %}
+    </ul>
+  </section>
+
+  <section>
+    <h3>Related events</h3>
+    {% set relation_labels = {
+      "precedes": {"outgoing": "Precedes", "incoming": "Preceded by"},
+      "similar": {"outgoing": "Similar to", "incoming": "Similar to"},
+      "escalation-of": {"outgoing": "Escalation of", "incoming": "Escalated by"},
+      "context-for": {"outgoing": "Context for", "incoming": "Context from"}
+    } %}
+    <ul>
+      {% for related in event.related_events %}
+      <li>
+        {{ relation_labels[related.relation][related.direction] }}:
+        <a href="/events/{{ related.event_id }}">{{ related.title }}</a>
+      </li>
+      {% else %}
+      <li>No related events.</li>
+      {% endfor %}
+    </ul>
+  </section>
+</div>

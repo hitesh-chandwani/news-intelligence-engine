@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+
+{% block title %}{{ event.title }} — News Intelligence Engine{% endblock %}
+
+{% block content %}
+  <p><a href="/events">&larr; Back to timeline</a></p>
+  {% include "partials/event_detail.html" %}
+{% endblock %}

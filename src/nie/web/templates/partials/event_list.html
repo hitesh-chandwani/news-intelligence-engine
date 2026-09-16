@@ -1,0 +1,25 @@
+<div id="event-list">
+  {% for event in events %}
+  <article>
+    <a href="/events/{{ event.id }}">
+      <strong>{{ event.title }}</strong>
+    </a>
+    <p>
+      {% if event.event_date %}{{ event.event_date }}{% else %}Date unknown{% endif %}
+      &mdash;
+      <span>Importance: {{ event.importance or "unscored" }}</span>
+      &mdash;
+      <span>Relevance: {{ event.relevance or "unscored" }}</span>
+    </p>
+    <p>
+      {% for category in event.categories %}
+      <span>{{ category }}</span>
+      {% else %}
+      <span>No categories</span>
+      {% endfor %}
+    </p>
+  </article>
+  {% else %}
+  <p>No events match the current filters.</p>
+  {% endfor %}
+</div>
