@@ -308,6 +308,53 @@ async def test_get_context_html_accept_header_gets_full_page(
     assert "System context" in response.text
 
 
+async def test_full_page_loads_json_enc_extension_script(seeded_client: AsyncClient) -> None:
+    """The full `context.html` page (extends `base.html`) loads htmx's
+    `json-enc` extension script -- required for the add-item/edit `<form>`
+    elements' `hx-ext="json-enc"` (see
+    `test_user_items_forms_use_json_enc_extension`) to actually take
+    effect in a real browser. Regression test for the bug QA found on
+    #35's first pass: without this script tag (and the matching
+    `hx-ext="json-enc"` on the forms), htmx serializes a submitted form as
+    `application/x-www-form-urlencoded`, but `POST /context`/`PATCH
+    /context/{id}` only accept a JSON body -- so a real form submission
+    always failed with `422`, even though every test that posted `json=`
+    directly (bypassing the actual rendered form) passed.
+    """
+    response = await seeded_client.get(
+        "/context", headers={"Accept": "text/html,application/xhtml+xml"}
+    )
+    assert response.status_code == 200
+    assert "htmx.org@1.9.12/dist/ext/json-enc.js" in response.text
+
+
+async def test_user_items_forms_use_json_enc_extension(seeded_client: AsyncClient) -> None:
+    """Both the add-item form and a user item's edit form in the rendered
+    `partials/context_user_items.html` fragment carry `hx-ext="json-enc"`,
+    so htmx serializes their submitted fields as a JSON body instead of
+    the default `application/x-www-form-urlencoded` -- matching what
+    `POST /context`/`PATCH /context/{id}` actually accept. Regression test
+    for the bug QA found on #35's first pass (see
+    `test_full_page_loads_json_enc_extension_script`'s docstring for the
+    full mechanism); a full real-browser form submission isn't practical
+    in this httpx-based harness, so this attribute-presence assertion is
+    the practical regression guard.
+    """
+    unique = uuid.uuid4()
+    create_response = await seeded_client.post(
+        "/context",
+        json={"label": f"json-enc check {unique}", "body": f"json-enc check body {unique}"},
+    )
+    assert create_response.status_code == 201
+
+    response = await seeded_client.get("/context", headers={"HX-Request": "true"})
+    assert response.status_code == 200
+    # At least the add-item form plus one edit form (the item just
+    # created above, which guarantees at least one user item exists to
+    # render an edit form for).
+    assert response.text.count('hx-ext="json-enc"') >= 2
+
+
 async def test_get_context_plain_request_gets_json(seeded_client: AsyncClient) -> None:
     """No `HX-Request` header and a non-`text/html` `Accept` (including
     `httpx`'s default `*/*`) gets JSON, not HTML.

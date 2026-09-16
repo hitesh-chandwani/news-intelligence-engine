@@ -26,6 +26,7 @@
       hx-patch="/context/{{ item.id }}"
       hx-target="#user-context-items"
       hx-swap="outerHTML"
+      hx-ext="json-enc"
     >
       <label>
         Label
@@ -48,7 +49,7 @@
   <p>No user context items yet.</p>
   {% endfor %}
 
-  <form hx-post="/context" hx-target="#user-context-items" hx-swap="outerHTML">
+  <form hx-post="/context" hx-target="#user-context-items" hx-swap="outerHTML" hx-ext="json-enc">
     <label>
       Label
       <input type="text" name="label" required />
