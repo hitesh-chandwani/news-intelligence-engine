@@ -1,0 +1,62 @@
+<div id="user-context-items">
+  <h2>Your context</h2>
+  {% for item in user_items %}
+  <article>
+    <div id="context-item-view-{{ item.id }}">
+      <h3>{{ item.label }}</h3>
+      <p>{{ item.body }}</p>
+      <button
+        type="button"
+        onclick="document.getElementById('context-item-edit-{{ item.id }}').removeAttribute('hidden'); document.getElementById('context-item-view-{{ item.id }}').setAttribute('hidden', 'hidden')"
+      >
+        Edit
+      </button>
+      <button
+        hx-delete="/context/{{ item.id }}"
+        hx-target="#user-context-items"
+        hx-swap="outerHTML"
+        hx-confirm="Delete this context item?"
+      >
+        Delete
+      </button>
+    </div>
+    <form
+      id="context-item-edit-{{ item.id }}"
+      hidden
+      hx-patch="/context/{{ item.id }}"
+      hx-target="#user-context-items"
+      hx-swap="outerHTML"
+    >
+      <label>
+        Label
+        <input type="text" name="label" value="{{ item.label }}" required />
+      </label>
+      <label>
+        Body
+        <textarea name="body" required>{{ item.body }}</textarea>
+      </label>
+      <button type="submit">Save</button>
+      <button
+        type="button"
+        onclick="document.getElementById('context-item-edit-{{ item.id }}').setAttribute('hidden', 'hidden'); document.getElementById('context-item-view-{{ item.id }}').removeAttribute('hidden')"
+      >
+        Cancel
+      </button>
+    </form>
+  </article>
+  {% else %}
+  <p>No user context items yet.</p>
+  {% endfor %}
+
+  <form hx-post="/context" hx-target="#user-context-items" hx-swap="outerHTML">
+    <label>
+      Label
+      <input type="text" name="label" required />
+    </label>
+    <label>
+      Body
+      <textarea name="body" required></textarea>
+    </label>
+    <button type="submit">Add context item</button>
+  </form>
+</div>

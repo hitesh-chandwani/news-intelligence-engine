@@ -1,0 +1,15 @@
+<div id="context-lists">
+  <section id="system-context-items">
+    <h2>System context</h2>
+    {% for item in system_items %}
+    <article>
+      <h3>{{ item.label }}</h3>
+      <p>{{ item.body }}</p>
+    </article>
+    {% else %}
+    <p>No system context items.</p>
+    {% endfor %}
+  </section>
+
+  {% include "partials/context_user_items.html" %}
+</div>
