@@ -178,6 +178,10 @@ async def create_context_item(
     item = ContextItem(watch_id=watch.id, kind="user", label=payload.label, body=payload.body)
     session.add(item)
     await session.commit()
+    # `commit()` expires all attributes by default (`expire_on_commit=True`);
+    # `_to_response` needs the server-assigned `created_at`/`updated_at`, so
+    # refresh before reading them back.
+    await session.refresh(item)
     return await _respond_write(request, session, watch.id, 201, _to_response(item))
 
 
@@ -197,8 +201,12 @@ async def update_context_item(
         item.label = payload.label
     if payload.body is not None:
         item.body = payload.body
+    watch_id = item.watch_id
     await session.commit()
-    return await _respond_write(request, session, item.watch_id, 200, _to_response(item))
+    # Same reasoning as `create_context_item`: `commit()` expires `item`'s
+    # attributes, and `_to_response` needs the refreshed `updated_at`.
+    await session.refresh(item)
+    return await _respond_write(request, session, watch_id, 200, _to_response(item))
 
 
 @router.delete("/context/{item_id}")
