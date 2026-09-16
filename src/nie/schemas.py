@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class PipelineRunSummary(BaseModel):
@@ -47,3 +47,59 @@ class WatchStatusResponse(BaseModel):
     slug: str
     status: str
     last_run: PipelineRunSummary | None
+
+
+class ContextItemResponse(BaseModel):
+    """Response body for a single `nie.models.ContextItem` row (issue #35).
+
+    Mirrors every column except `watch_id` -- every endpoint in
+    `nie.web.routers.context` is scoped to the single Silver watch
+    (`nie.seed.run.SILVER_WATCH_SLUG`), so the watch a row belongs to is
+    never ambiguous and not worth echoing back on the wire.
+    """
+
+    id: uuid.UUID
+    kind: str
+    label: str
+    body: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ContextItemCreate(BaseModel):
+    """Request body for `POST /context` (issue #35).
+
+    Deliberately has **no** `kind` field -- the router always creates
+    `kind="user"` rows, so a client can never request `kind="system"`
+    through this schema. `label`/`body` are both required and must be
+    non-blank (whitespace-only strings rejected), producing FastAPI's
+    standard `422` on a missing/blank field.
+    """
+
+    label: str = Field(min_length=1)
+    body: str = Field(min_length=1)
+
+    @field_validator("label", "body")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+
+class ContextItemUpdate(BaseModel):
+    """Request body for `PATCH /context/{id}` (issue #35).
+
+    Both fields are optional -- the router updates only whichever fields
+    are set -- but a model validator rejects a body where both are `None`
+    (`422`), since a no-op PATCH is a client error, not a valid request.
+    """
+
+    label: str | None = None
+    body: str | None = None
+
+    @model_validator(mode="after")
+    def _at_least_one_set(self) -> ContextItemUpdate:
+        if self.label is None and self.body is None:
+            raise ValueError("at least one of label or body must be set")
+        return self
