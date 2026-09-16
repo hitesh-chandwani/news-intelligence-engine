@@ -1,0 +1,51 @@
+<div id="preferences-form-wrapper">
+  <form
+    hx-patch="/preferences"
+    hx-target="#preferences-form-wrapper"
+    hx-swap="outerHTML"
+    hx-ext="json-enc"
+  >
+    <label>
+      Minimum importance
+      <select name="min_importance">
+        {% for value in ["low", "medium", "high", "critical"] %}
+        <option value="{{ value }}" {% if preference.min_importance == value %}selected{% endif %}>
+          {{ value }}
+        </option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <fieldset>
+      <legend>Categories (none selected means all categories)</legend>
+      {% for category in categories %}
+      <label>
+        <input
+          type="checkbox"
+          name="categories"
+          value="{{ category.slug }}"
+          {% if category.slug in preference.categories %}checked{% endif %}
+        />
+        {{ category.name }}
+      </label>
+      {% endfor %}
+    </fieldset>
+
+    <fieldset>
+      <legend>Channels</legend>
+      {% for channel in ["telegram", "email", "inapp"] %}
+      <label>
+        <input
+          type="checkbox"
+          name="channels"
+          value="{{ channel }}"
+          {% if channel in preference.channels %}checked{% endif %}
+        />
+        {{ channel }}
+      </label>
+      {% endfor %}
+    </fieldset>
+
+    <button type="submit">Save preferences</button>
+  </form>
+</div>
