@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
@@ -43,11 +43,47 @@ SessionDep = Annotated[AsyncSession, Depends(get_session)]
 _MAX_EVENTS = 200
 
 # The exact value sets `nie.models.Event`'s `CheckConstraint`s allow for
-# `relevance`/`importance` -- a `Literal` query param type gives FastAPI's
-# standard `422` on anything outside these sets, with no custom validator
-# needed.
-ImportanceFilter = Literal["low", "medium", "high", "critical"]
-RelevanceFilter = Literal["irrelevant", "low", "medium", "high"]
+# `importance`/`relevance`.
+_IMPORTANCE_VALUES = {"low", "medium", "high", "critical"}
+_RELEVANCE_VALUES = {"irrelevant", "low", "medium", "high"}
+
+
+def _normalize_enum_query(value: str | None, allowed: set[str], field_name: str) -> str | None:
+    """Validate an `importance`/`relevance` query param against `allowed`,
+    raising the same `422` FastAPI's own enum validation would give for a
+    value outside that set.
+
+    Blank (`""`) is treated the same as omitted (`None`) -- "no filter" --
+    rather than an invalid value: `events.html`'s filter `<select>`s each
+    carry a blank "Any" `<option>` (native `<select>`s, unlike checkboxes,
+    have no way to omit a field entirely; leaving it unselected still
+    submits `name=`), and this is the one normalization point that turns
+    that into "not filtered on this field", same intent as `importance`/
+    `relevance` simply being absent from the query string.
+    """
+    if value is None or value == "":
+        return None
+    if value not in allowed:
+        raise HTTPException(
+            status_code=422, detail=f"{field_name} must be one of {sorted(allowed)}"
+        )
+    return value
+
+
+def _parse_optional_datetime(value: str | None, field_name: str) -> datetime | None:
+    """Parse `date_from`/`date_to` from an ISO 8601 string, `422` on an
+    unparseable non-blank value. Blank (`""`) is "no filter", same
+    reasoning as `_normalize_enum_query` -- `events.html`'s `date`
+    `<input>`s submit `name=` when left empty, same as the `<select>`s.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422, detail=f"{field_name} must be an ISO 8601 datetime"
+        ) from exc
 
 
 async def _get_silver_watch(session: AsyncSession) -> Watch:
@@ -110,8 +146,8 @@ async def _list_events(
     session: AsyncSession,
     watch: Watch,
     category: list[str] | None,
-    importance: ImportanceFilter | None,
-    relevance: RelevanceFilter | None,
+    importance: str | None,
+    relevance: str | None,
     date_from: datetime | None,
     date_to: datetime | None,
 ) -> list[EventSummary]:
@@ -259,10 +295,10 @@ async def list_events(
     request: Request,
     session: SessionDep,
     category: Annotated[list[str] | None, Query()] = None,
-    importance: ImportanceFilter | None = None,
-    relevance: RelevanceFilter | None = None,
-    date_from: datetime | None = None,
-    date_to: datetime | None = None,
+    importance: Annotated[str | None, Query()] = None,
+    relevance: Annotated[str | None, Query()] = None,
+    date_from: Annotated[str | None, Query()] = None,
+    date_to: Annotated[str | None, Query()] = None,
 ) -> Response:
     """Three-way negotiation, same pattern `context.py`'s `get_context`
     (#35) established:
@@ -274,17 +310,31 @@ async def list_events(
       (`events.html`, includes the filter form + the same list fragment)
     - anything else (including `httpx`'s default `*/*`) -> `200
       application/json`, a JSON array of `EventSummary`
+
+    `importance`/`relevance`/`date_from`/`date_to` are taken as plain
+    strings (rather than typed directly as e.g. `Literal[...] | None` or
+    `datetime | None`) so `_normalize_enum_query`/`_parse_optional_datetime`
+    can treat a blank value the same as an omitted one -- see their
+    docstrings for why a native HTML `<select>`/`<input type="date">`
+    needs that (unlike a checkbox, neither can be omitted from a
+    submission by being left at its default).
     """
     watch = await _get_silver_watch(session)
-    events = await _list_events(session, watch, category, importance, relevance, date_from, date_to)
+    importance_value = _normalize_enum_query(importance, _IMPORTANCE_VALUES, "importance")
+    relevance_value = _normalize_enum_query(relevance, _RELEVANCE_VALUES, "relevance")
+    date_from_value = _parse_optional_datetime(date_from, "date_from")
+    date_to_value = _parse_optional_datetime(date_to, "date_to")
+    events = await _list_events(
+        session, watch, category, importance_value, relevance_value, date_from_value, date_to_value
+    )
 
     templates: Jinja2Templates = request.app.state.templates
     filters = {
         "category": category or [],
-        "importance": importance,
-        "relevance": relevance,
-        "date_from": date_from,
-        "date_to": date_to,
+        "importance": importance_value,
+        "relevance": relevance_value,
+        "date_from": date_from_value,
+        "date_to": date_to_value,
     }
 
     if request.headers.get("HX-Request"):
