@@ -18,6 +18,18 @@
 
     <fieldset>
       <legend>Categories (none selected means all categories)</legend>
+      <!--
+        Hidden fallback: htmx's json-enc extension omits an unchecked
+        checkbox from the submitted values entirely, so unchecking every
+        box below would otherwise drop "categories" from the PATCH body
+        altogether (a no-op, since PreferenceUpdate treats a missing
+        field as "leave unchanged") instead of clearing it to []. This
+        keeps the key present even then; PreferenceUpdate's
+        _normalize_checkbox_group validator (src/nie/schemas.py) drops
+        this empty-string entry back out, alone or mixed with real
+        checked values.
+      -->
+      <input type="hidden" name="categories" value="" />
       {% for category in categories %}
       <label>
         <input
@@ -33,6 +45,8 @@
 
     <fieldset>
       <legend>Channels</legend>
+      <!-- Same hidden-fallback reasoning as the categories fieldset above. -->
+      <input type="hidden" name="channels" value="" />
       {% for channel in ["telegram", "email", "inapp"] %}
       <label>
         <input

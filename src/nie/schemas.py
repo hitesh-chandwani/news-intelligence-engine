@@ -146,6 +146,44 @@ class PreferenceUpdate(BaseModel):
     categories: list[str] | None = None
     channels: list[str] | None = None
 
+    @field_validator("categories", "channels", mode="before")
+    @classmethod
+    def _normalize_checkbox_group(cls, value: Any) -> Any:
+        """Reshape what htmx's `json-enc` extension actually produces from
+        a checkbox group into the plain list `_valid_channels`/Pydantic's
+        own list coercion expect, before that validation runs (QA's #36
+        FAIL comment -- same root-cause class as #35's form-encoding bug,
+        caught only because QA simulated real checkbox serialization
+        instead of passing a clean JSON list directly):
+
+        - htmx only arrays a `name` when *two or more* elements share it
+          (`addValueToValues` in `htmx.js`); a single checked checkbox in
+          the group serializes as a bare string (e.g.
+          `{"channels": "telegram"}`), not a one-element list. Wrap a bare
+          string into `[value]` so it validates the same as a real
+          multi-select.
+        - htmx omits an unchecked checkbox from the submitted values
+          entirely, so `partials/preferences_form.html`'s fieldsets each
+          carry a hidden `<input type="hidden" name="..." value="">`
+          fallback ahead of the checkboxes to keep the key present (and
+          therefore not silently no-op the PATCH) even when nothing in
+          the group is checked. Drop empty-string entries from a list so
+          that fallback -- alone, or mixed with real checked values --
+          round-trips to `[]` when nothing is checked and to just the
+          real selections otherwise.
+
+        `None` (the field not sent at all -- a genuine "leave unchanged"
+        PATCH) passes through unchanged; this only reshapes a value that
+        was actually sent.
+        """
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = [value]
+        if isinstance(value, list):
+            return [item for item in value if item != ""]
+        return value
+
     @field_validator("min_importance")
     @classmethod
     def _valid_min_importance(cls, value: str | None) -> str | None:

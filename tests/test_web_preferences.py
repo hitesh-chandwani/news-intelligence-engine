@@ -212,6 +212,93 @@ async def test_patch_empty_body_is_a_noop_leaving_everything_unchanged(
     assert after["channels"] == before["channels"]
 
 
+async def test_patch_bare_string_checkbox_value_normalizes_to_single_element_list(
+    seeded_client: AsyncClient,
+) -> None:
+    """Regression test for QA's #36 FAIL, bug 1: htmx's `json-enc`
+    extension only arrays a `name` when *two or more* elements share it
+    (`addValueToValues` in `htmx.js`) -- exactly one checked checkbox in a
+    group serializes as a bare string, e.g. `{"channels": "telegram"}`,
+    not `{"channels": ["telegram"]}`. Every other test in this module
+    passes a clean JSON list directly via httpx, which never exercises
+    this shape -- this test sends the bare string a real single-checkbox
+    submission would actually produce. Must succeed (not `422`) and
+    persist as a one-element list.
+    """
+    response = await seeded_client.patch("/preferences", json={"channels": "telegram"})
+    assert response.status_code == 200
+    assert response.json()["channels"] == ["telegram"]
+
+    get_response = await seeded_client.get("/preferences")
+    assert get_response.json()["channels"] == ["telegram"]
+
+
+async def test_patch_all_unchecked_hidden_fallback_normalizes_to_empty_list(
+    seeded_client: AsyncClient,
+) -> None:
+    """Regression test for QA's #36 FAIL, bug 2: htmx omits an unchecked
+    checkbox from the submitted values entirely, so
+    `partials/preferences_form.html`'s fieldsets each carry a hidden
+    `<input type="hidden" name="categories" value="">` fallback (same for
+    `channels`) ahead of the checkboxes, keeping the key present even
+    when nothing in the group is checked -- otherwise the key would be
+    missing from the PATCH body altogether, and `PreferenceUpdate`
+    treats a missing field as "leave unchanged", silently no-opping
+    instead of clearing to `[]` (breaking "empty selection means all
+    categories").
+
+    Reasoning through htmx's `addValueToValues` merge: when the hidden
+    fallback is the *only* element sharing a `name` (every real checkbox
+    in the group unchecked), htmx does not array a name shared by only
+    one element -- so the real payload shape is the bare empty string
+    `{"categories": ""}`, not `{"categories": [""]}`. Both shapes are
+    exercised here (this test's bare string, and a same-shaped list in
+    `test_patch_two_empty_strings_in_a_list_also_normalizes_to_empty_list`
+    below) since the validator must handle either.
+    """
+    response = await seeded_client.patch("/preferences", json={"categories": ""})
+    assert response.status_code == 200
+    assert response.json()["categories"] == []
+
+    get_response = await seeded_client.get("/preferences")
+    assert get_response.json()["categories"] == []
+
+
+async def test_patch_two_empty_strings_in_a_list_also_normalizes_to_empty_list(
+    seeded_client: AsyncClient,
+) -> None:
+    """Defense-in-depth alongside the bare-string case above: if the
+    hidden-fallback value were ever merged into a list of empty strings
+    (e.g. `{"categories": ["", ""]}`) rather than a bare string, the
+    validator's empty-string filtering must still normalize it to `[]`,
+    not `422` or leave stray blank entries in the stored array.
+    """
+    response = await seeded_client.patch("/preferences", json={"categories": ["", ""]})
+    assert response.status_code == 200
+    assert response.json()["categories"] == []
+
+
+async def test_patch_hidden_fallback_mixed_with_one_checked_box_keeps_real_value(
+    seeded_client: AsyncClient,
+) -> None:
+    """The mixed case: the hidden fallback (empty string) plus exactly
+    one real checked checkbox. Per htmx's `addValueToValues`, the hidden
+    input is processed first (it's placed before the checkboxes in
+    `partials/preferences_form.html`), so `values["categories"]` starts
+    as the bare string `""`; merging in the one checked box's value then
+    produces the array `["", "market"]` -- two elements now sharing the
+    name. The empty-string entry must be filtered out, leaving only the
+    real selection, proving the filtering doesn't interfere with actual
+    checked values.
+    """
+    response = await seeded_client.patch("/preferences", json={"categories": ["", "market"]})
+    assert response.status_code == 200
+    assert response.json()["categories"] == ["market"]
+
+    get_response = await seeded_client.get("/preferences")
+    assert get_response.json()["categories"] == ["market"]
+
+
 async def test_patch_invalid_min_importance_returns_422(seeded_client: AsyncClient) -> None:
     """`min_importance` outside `{"low", "medium", "high", "critical"}`
     returns `422`.
@@ -343,6 +430,22 @@ async def test_preferences_form_uses_json_enc_extension(seeded_client: AsyncClie
     fragment_response = await seeded_client.get("/preferences", headers={"HX-Request": "true"})
     assert fragment_response.status_code == 200
     assert 'hx-ext="json-enc"' in fragment_response.text
+
+
+async def test_preferences_form_renders_hidden_fallback_inputs_for_checkbox_groups(
+    seeded_client: AsyncClient,
+) -> None:
+    """Both the `categories` and `channels` fieldsets render a hidden
+    `<input type="hidden" name="..." value="">` fallback ahead of their
+    checkboxes -- ties `partials/preferences_form.html`'s UI fix for QA's
+    #36 FAIL bug 2 to a test, so a future edit that drops the hidden input
+    (silently reintroducing "unchecking everything can never write `[]`")
+    fails here rather than only in a real browser.
+    """
+    response = await seeded_client.get("/preferences", headers={"HX-Request": "true"})
+    assert response.status_code == 200
+    assert '<input type="hidden" name="categories" value="" />' in response.text
+    assert '<input type="hidden" name="channels" value="" />' in response.text
 
 
 async def test_categories_multi_select_lists_all_seeded_categories_and_preselects_current(
