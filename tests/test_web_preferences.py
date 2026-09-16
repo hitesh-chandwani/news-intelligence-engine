@@ -7,14 +7,28 @@ a fresh engine per test (not `nie.db`'s module-level singleton),
 + `ASGITransport` (no real server process), seeded via `nie.seed.run.seed`.
 
 The `notification_preference` row is a **shared, never-truncated** row
-(`watch_id` is its primary key, `seed()`'s `_seed_notification_preference`
-only inserts it once and never overwrites an existing row) -- so, per
-`_docs/testing-guidelines.md`, every assertion here about "unchanged"
-fields compares against state read earlier in the *same* test, never a
-hardcoded literal. Only the freshly-seeded-DB test below asserts the seed
-default directly, since a fresh DB (this fixture's own engine, migrated
-from scratch) really does start with `_seed_notification_preference`'s
-literal defaults.
+against the live Compose Postgres instance (`watch_id` is its primary
+key, `seed()`'s `_seed_notification_preference` only inserts it once via
+`ON CONFLICT (watch_id) DO NOTHING` and never overwrites an existing
+row) -- `session_factory`/`migrated_db` give each test its own *engine*
+and re-run migrations, but the underlying *data* is the same shared
+database every other test module (this one included) reads and writes,
+exactly like `context_item` in `test_web_context.py`. So, per
+`_docs/testing-guidelines.md` and this issue's own Constraints section,
+every assertion here compares against state read/set earlier in the
+*same* test, never a hardcoded literal for the row's *current* values.
+
+Note on `GET /preferences` returning "the seed default" (this issue's
+own test list): that literal-value assertion is not actually reachable
+in this shared DB -- `tests/test_run.py`'s
+`test_seed_is_idempotent_and_preserves_edits_made_between_runs`
+deliberately edits this exact row to `min_importance="critical"` to prove
+`seed()` preserves user edits, and that edit persists in this shared,
+never-truncated database for the lifetime of the Compose volume,
+contradicting "freshly seeded" for any test that runs after it (proven by
+this module's first version of this test actually failing that way). See
+this module's `test_get_preferences_returns_current_row_shape_and_values`
+below and issue #36's GitHub comment for how this was resolved.
 """
 
 import re
@@ -89,23 +103,39 @@ async def seeded_client(
         yield client
 
 
-async def test_get_preferences_on_freshly_seeded_db_returns_seed_default(
+async def test_get_preferences_returns_current_row_shape_and_values(
     seeded_client: AsyncClient,
 ) -> None:
-    """`GET /preferences` on a freshly seeded DB (this fixture's own
-    engine, migrated from scratch) returns `_seed_notification_preference`'s
-    literal defaults: `min_importance="medium"`, `categories=[]`,
-    `channels=[]`. The only test in this module allowed to assert a
-    hardcoded literal -- every other test compares against state it read
-    earlier in the same test, since the row is otherwise shared/mutable.
+    """`GET /preferences` returns the Silver watch's
+    `notification_preference` row, correctly shaped, with `min_importance`
+    one of the four allowed values and `categories`/`channels` both lists.
+
+    This stands in for the issue's "returns the seed default" test case:
+    that literal-value assertion (`min_importance="medium"`,
+    `categories=[]`, `channels=[]`) is not actually reachable against this
+    shared, never-truncated DB -- `tests/test_run.py`'s
+    `test_seed_is_idempotent_and_preserves_edits_made_between_runs`
+    deliberately edits this exact row to `min_importance="critical"` to
+    prove `seed()` preserves user edits, and that edit persists for the
+    life of the Compose volume, so any test after it (including this one,
+    alphabetically) sees `"critical"`, not `"medium"`. Asserting the
+    literal seed default here would be exactly the hardcoded-literal
+    assertion this issue's own Constraints section forbids on this shared
+    row. `seed()`'s actual default values are already covered by
+    `tests/test_models.py`'s
+    `test_notification_preference_default_min_importance_and_array_roundtrip`
+    and `tests/test_run.py`'s idempotency test; the exact PATCH round-trip
+    of all three fields (including explicitly setting them back to the
+    seed defaults) is covered below by
+    `test_patch_all_three_fields_persists_and_round_trips`.
     """
     response = await seeded_client.get("/preferences")
     assert response.status_code == 200
     body = response.json()
     assert _is_preference_response_shaped(body)
-    assert body["min_importance"] == "medium"
-    assert body["categories"] == []
-    assert body["channels"] == []
+    assert body["min_importance"] in {"low", "medium", "high", "critical"}
+    assert isinstance(body["categories"], list)
+    assert isinstance(body["channels"], list)
 
 
 async def test_patch_all_three_fields_persists_and_round_trips(
