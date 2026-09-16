@@ -103,3 +103,61 @@ class ContextItemUpdate(BaseModel):
         if self.label is None and self.body is None:
             raise ValueError("at least one of label or body must be set")
         return self
+
+
+# The exact value sets `nie.models.NotificationPreference`'s
+# `CheckConstraint`s (`min_importance`) and `design.md` §10 (`channels`)
+# allow -- shared by both schemas below so the two `field_validator`s stay
+# in lockstep with each other and with the DB constraint.
+_MIN_IMPORTANCE_VALUES = {"low", "medium", "high", "critical"}
+_CHANNEL_VALUES = {"telegram", "email", "inapp"}
+
+
+class PreferenceResponse(BaseModel):
+    """Response body for `GET /preferences` and `PATCH /preferences`
+    (issue #36). Mirrors every column of a `nie.models.NotificationPreference`
+    row, including `watch_id` -- unlike `ContextItemResponse`, there's no
+    established precedent yet for omitting it, and this table's primary key
+    *is* `watch_id` (no synthetic `id` column).
+    """
+
+    watch_id: uuid.UUID
+    min_importance: str
+    categories: list[str]
+    channels: list[str]
+
+
+class PreferenceUpdate(BaseModel):
+    """Request body for `PATCH /preferences` (issue #36).
+
+    All three fields are optional -- the router updates only whichever
+    fields are set, leaving the rest unchanged. Unlike `ContextItemUpdate`,
+    there is **no** model validator rejecting an all-`None` body: a `PATCH`
+    that sets nothing is a harmless no-op here, since every field already
+    has a well-defined current value to leave alone.
+
+    `categories` is deliberately **not** validated against the live
+    `category` table -- a category slug deleted after being selected would
+    otherwise 422 forever, and the notify gate (#30) already treats an
+    unrecognized slug in `pref.categories` as simply never matching.
+    """
+
+    min_importance: str | None = None
+    categories: list[str] | None = None
+    channels: list[str] | None = None
+
+    @field_validator("min_importance")
+    @classmethod
+    def _valid_min_importance(cls, value: str | None) -> str | None:
+        if value is not None and value not in _MIN_IMPORTANCE_VALUES:
+            raise ValueError(f"min_importance must be one of {sorted(_MIN_IMPORTANCE_VALUES)}")
+        return value
+
+    @field_validator("channels")
+    @classmethod
+    def _valid_channels(cls, value: list[str] | None) -> list[str] | None:
+        if value is not None:
+            invalid = sorted(set(value) - _CHANNEL_VALUES)
+            if invalid:
+                raise ValueError(f"channels entries must be one of {sorted(_CHANNEL_VALUES)}")
+        return value
