@@ -17,7 +17,7 @@ from fastapi import FastAPI
 from fastapi.templating import Jinja2Templates
 
 from nie.scheduler import create_scheduler
-from nie.web.routers import context, events, notifications, pipeline, preferences, watch
+from nie.web.routers import context, dashboard, events, notifications, pipeline, preferences, watch
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -48,9 +48,9 @@ def create_app() -> FastAPI:
     """Build the FastAPI app: `Jinja2Templates` on `app.state.templates`
     (read by the routers to render `templates/`), the watch (#34),
     context (#35), preferences (#36), events (#37), notifications (#38),
-    and pipeline (#43) routers included -- `design.md` §12's full router
-    table is added incrementally by later tasks -- plus the
-    `AsyncIOScheduler` (#40) started/stopped via `lifespan`.
+    pipeline (#43), and dashboard (#49) routers included -- `design.md`
+    §12's full router table is added incrementally by later tasks -- plus
+    the `AsyncIOScheduler` (#40) started/stopped via `lifespan`.
 
     `app.state.pipeline_lock` (issue #43) is set directly here, not
     inside `_lifespan`: `httpx.ASGITransport` (used by every existing web
@@ -72,4 +72,5 @@ def create_app() -> FastAPI:
     app.include_router(events.router)
     app.include_router(notifications.router)
     app.include_router(pipeline.router)
+    app.include_router(dashboard.router)
     return app
