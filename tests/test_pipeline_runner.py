@@ -367,9 +367,10 @@ async def test_all_stages_running_end_to_end_produce_an_ok_run(
         # AND no existing outbound `event_relation` row, no `watch_id`
         # filter, by design) can pick up rows left behind by other test
         # files sharing this never-truncated DB.
-        assert set(run.stats["relate"]) == {"related", "skipped"}
+        assert set(run.stats["relate"]) == {"related", "skipped", "relate_capped"}
         assert isinstance(run.stats["relate"]["related"], int)
         assert isinstance(run.stats["relate"]["skipped"], int)
+        assert isinstance(run.stats["relate"]["relate_capped"], int)
         # notify_stage (#48) is now real too, same shape-only treatment as
         # relate's above: its own selection (no prior `notification` row, or
         # `last_material_update_at` past the latest one's `created_at`) has

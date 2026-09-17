@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nie.config import Settings
 from nie.llm.client import LLMClient
 from nie.models import Event, EventRelation
 from nie.pipeline.match import find_entity_overlapping_events, find_nearest_events
@@ -180,10 +181,13 @@ async def relate_stage(session: AsyncSession, *, client: LLMClient | None = None
     `event_relation` rows.
 
     `client` defaults to constructing its own `LLMClient()` when not given,
-    same as `adjudicate_stage`/`score_stage`.
+    same as `adjudicate_stage`/`score_stage`. Reads `Settings().
+    max_relate_attempts` fresh on every call, same "construct `Settings()`
+    inside the stage" pattern `extract_stage`/`score_stage` use.
 
     Selects rows via `select(Event).where(Event.relevance.isnot(None),
-    Event.related_at.is_(None))` and processes them sequentially (no
+    Event.related_at.is_(None), Event.relate_attempts <
+    settings.max_relate_attempts)` and processes them sequentially (no
     concurrency), same style as `adjudicate_stage`/`score_stage`.
     `relevance IS NOT NULL` means "scored" (no special-casing by value,
     same "not this stage's job to gate on `irrelevant`" precedent
@@ -193,11 +197,16 @@ async def relate_stage(session: AsyncSession, *, client: LLMClient | None = None
     every future selection *regardless of how many relations it ended up
     with*, including zero (#47; this replaces the older "no existing
     outbound `event_relation` row" criterion, which reselected
-    zero-relation events forever).
+    zero-relation events forever). An event already at `relate_attempts >=
+    max_relate_attempts` is excluded by the third clause entirely (#55):
+    it's never loaded, never passed to `call_structured`, and its
+    `relate_attempts` is left unchanged.
 
     For each row: calls `_find_candidates` (merges `find_nearest_events` +
     `find_entity_overlapping_events`, tags, loads full `Event` rows),
-    builds `messages` from `relate.md`, and calls
+    builds `messages` from `relate.md`, increments `event.relate_attempts`
+    by 1 (mirroring `score_stage`'s `event.score_attempts += 1` placement
+    -- immediately before the call that might fail), and calls
     `client.call_structured(messages, RelationSet)`.
 
     A `json.JSONDecodeError`/`pydantic.ValidationError` still raised after
@@ -205,11 +214,11 @@ async def relate_stage(session: AsyncSession, *, client: LLMClient | None = None
     whole-event failure: the event's `event_relation` rows are left
     completely unchanged (none added), `related_at` is left unset (same
     "leave the row unmodified, retry next run" precedent #45/#46 set for
-    `extract_attempts`/`score_attempts`, though this stage has no
-    attempt cap yet -- see the issue's "Out of scope"), and it is counted
-    under `"skipped"`; the loop continues to the next event. Any other
-    exception propagates out of `relate_stage` uncaught, same precedent
-    as `score_stage`/`adjudicate_stage`.
+    `extract_attempts`/`score_attempts`; `relate_attempts` is already
+    incremented above, per #55), and it is counted under `"skipped"`;
+    the loop continues to the next event. Any other exception propagates
+    out of `relate_stage` uncaught, same precedent as
+    `score_stage`/`adjudicate_stage`.
 
     On a successful, structurally-valid `RelationSet`, `event.related_at`
     is set to `datetime.now(UTC)` regardless of how many relations survive
@@ -240,24 +249,40 @@ async def relate_stage(session: AsyncSession, *, client: LLMClient | None = None
     Does not call `session.commit()` -- the runner (#18) commits after
     the stage returns.
 
-    Returns `{"related": N, "skipped": S}` -- `related` counts events for
-    which at least one `event_relation` row was persisted this call. An
-    event whose only proposals were all filtered out, or whose
-    `RelationSet` was legitimately empty, counts toward neither
-    `"related"` nor `"skipped"` -- it simply produced zero rows this pass
-    (not an error; `related_at` is still set for it, per #47, so it is
-    not reselected on a future call).
+    Returns `{"related": N, "skipped": S, "relate_capped": K}` --
+    `related` counts events for which at least one `event_relation` row
+    was persisted this call. An event whose only proposals were all
+    filtered out, or whose `RelationSet` was legitimately empty, counts
+    toward neither `"related"` nor `"skipped"` -- it simply produced zero
+    rows this pass (not an error; `related_at` is still set for it, per
+    #47, so it is not reselected on a future call). `relate_capped`
+    counts `Event.relevance.isnot(None), Event.related_at.is_(None)` rows
+    excluded by the cap this call (a separate count query -- `Event.
+    relate_attempts >= settings.max_relate_attempts` added to that same
+    pair of clauses -- not folded into the main loop, same pattern
+    `extract_stage`/`score_stage` use for `extract_capped`/`score_capped`).
     """
     if client is None:
         client = LLMClient()
+    settings = Settings()
 
     result = await session.execute(
         select(Event).where(
             Event.relevance.isnot(None),
             Event.related_at.is_(None),
+            Event.relate_attempts < settings.max_relate_attempts,
         )
     )
     events = result.scalars().all()
+
+    capped_result = await session.execute(
+        select(Event.id).where(
+            Event.relevance.isnot(None),
+            Event.related_at.is_(None),
+            Event.relate_attempts >= settings.max_relate_attempts,
+        )
+    )
+    relate_capped_count = len(capped_result.scalars().all())
 
     related_count = 0
     skipped_count = 0
@@ -267,6 +292,7 @@ async def relate_stage(session: AsyncSession, *, client: LLMClient | None = None
         candidate_ids = {candidate.event.id for candidate in candidates}
         messages = _build_messages(event, candidates)
 
+        event.relate_attempts += 1
         try:
             relation_set = await client.call_structured(messages, RelationSet)
         except (json.JSONDecodeError, ValidationError):
@@ -313,4 +339,8 @@ async def relate_stage(session: AsyncSession, *, client: LLMClient | None = None
         if inserted_any:
             related_count += 1
 
-    return {"related": related_count, "skipped": skipped_count}
+    return {
+        "related": related_count,
+        "skipped": skipped_count,
+        "relate_capped": relate_capped_count,
+    }
