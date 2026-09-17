@@ -210,6 +210,14 @@ async def _fetch_relations(
         return list(result.scalars().all())
 
 
+async def _fetch_event(
+    session_factory: async_sessionmaker[AsyncSession], event_id: uuid.UUID
+) -> Event:
+    async with session_factory() as session:
+        result = await session.execute(select(Event).where(Event.id == event_id))
+        return result.scalar_one()
+
+
 # ---------------------------------------------------------------------------
 # relate_stage
 # ---------------------------------------------------------------------------
@@ -575,3 +583,146 @@ async def test_relate_stage_handles_empty_candidate_pool(
 
     relations = await _fetch_relations(session_factory, lonely_id)
     assert relations == []
+
+
+# ---------------------------------------------------------------------------
+# related_at completion marker (#47)
+# ---------------------------------------------------------------------------
+
+
+async def test_relate_stage_sets_related_at_on_legitimately_empty_relation_set(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An event whose stubbed `RelationSet` is `{"relations": []}` -- the LLM
+    legitimately proposing zero relations, not a validation failure -- gets
+    `related_at` set from this single successful parse, and is not re-sent
+    to the LLM on a second `relate_stage` call. This is the #47 gap itself:
+    before this issue, such an event had no outbound `event_relation` row
+    and was reselected forever."""
+    client, stub_create = _client_with_stubbed_create()
+    stub_create.return_value = _FakeChatCompletion('{"relations": []}')
+
+    async with session_factory() as session:
+        watch = await _make_watch(session)
+        lonely = _make_event(watch.id, embedding=ANCHOR_EMBEDDING, title="Zero Relations")
+        session.add(lonely)
+        await session.commit()
+        lonely_id = lonely.id
+
+    async with session_factory() as session:
+        first_result = await relate_stage(session, client=client)
+        await session.commit()
+
+    assert first_result == {"related": 0, "skipped": 0}
+    assert stub_create.call_count == 1
+
+    event_after_first_call = await _fetch_event(session_factory, lonely_id)
+    assert event_after_first_call.related_at is not None
+
+    async with session_factory() as session:
+        second_result = await relate_stage(session, client=client)
+        await session.commit()
+
+    assert second_result == {"related": 0, "skipped": 0}
+    # Not reselected -- the LLM is never called for it again.
+    assert stub_create.call_count == 1
+
+    relations = await _fetch_relations(session_factory, lonely_id)
+    assert relations == []
+
+
+async def test_relate_stage_sets_related_at_when_only_proposal_filtered_to_zero(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An event whose only proposed relation is dropped by the existing
+    self-relation filter (so zero rows are persisted despite a non-empty
+    `RelationSet`) also gets `related_at` set, and is not re-sent on a
+    second call -- the filtered-to-zero case, distinct from the LLM
+    legitimately returning `[]` outright."""
+    client, stub_create = _client_with_stubbed_create()
+
+    async with session_factory() as session:
+        watch = await _make_watch(session)
+        anchor = _make_event(watch.id, embedding=ANCHOR_EMBEDDING, title="Anchor")
+        session.add(anchor)
+        await session.commit()
+        anchor_id = anchor.id
+
+    # The only proposal is a self-relation -- filtered out, zero rows
+    # persisted, despite a structurally non-empty `RelationSet`.
+    stub_create.return_value = _FakeChatCompletion(
+        f'{{"relations": [{{"event_id": "{anchor_id}", "relation": "similar", '
+        f'"rationale": "Self-relation, should be dropped."}}]}}'
+    )
+
+    async with session_factory() as session:
+        first_result = await relate_stage(session, client=client)
+        await session.commit()
+
+    assert first_result == {"related": 0, "skipped": 0}
+    assert stub_create.call_count == 1
+
+    event_after_first_call = await _fetch_event(session_factory, anchor_id)
+    assert event_after_first_call.related_at is not None
+
+    relations = await _fetch_relations(session_factory, anchor_id)
+    assert relations == []
+
+    async with session_factory() as session:
+        second_result = await relate_stage(session, client=client)
+        await session.commit()
+
+    assert second_result == {"related": 0, "skipped": 0}
+    # Not reselected -- the LLM is never called for it again, even though
+    # zero relations were ever actually persisted for this event.
+    assert stub_create.call_count == 1
+
+
+async def test_relate_stage_keeps_related_at_null_and_resends_on_repeated_validation_failure(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An event that fails validation on both `call_structured` attempts
+    keeps `related_at IS NULL` (same "leave the row unmodified, retry next
+    run" precedent the stage already establishes for `skipped`) and *is*
+    re-sent to the LLM on a second `relate_stage` call -- a transient LLM
+    failure is still retried, unlike a genuine "nothing to relate" outcome."""
+    client, stub_create = _client_with_stubbed_create()
+    # Structurally invalid JSON on both `call_structured` attempts for the
+    # first `relate_stage` call.
+    stub_create.side_effect = [
+        _FakeChatCompletion("not valid json"),
+        _FakeChatCompletion("still not valid json"),
+    ]
+
+    async with session_factory() as session:
+        watch = await _make_watch(session)
+        event = _make_event(watch.id, embedding=ANCHOR_EMBEDDING, title="Always Malformed")
+        session.add(event)
+        await session.commit()
+        event_id = event.id
+
+    async with session_factory() as session:
+        first_result = await relate_stage(session, client=client)
+        await session.commit()
+
+    assert first_result == {"related": 0, "skipped": 1}
+    assert stub_create.call_count == 2
+
+    event_after_first_call = await _fetch_event(session_factory, event_id)
+    assert event_after_first_call.related_at is None
+
+    # Second call: still selected (`related_at IS NULL`), and this time the
+    # LLM succeeds with an empty `RelationSet`.
+    stub_create.side_effect = None
+    stub_create.return_value = _FakeChatCompletion('{"relations": []}')
+
+    async with session_factory() as session:
+        second_result = await relate_stage(session, client=client)
+        await session.commit()
+
+    assert second_result == {"related": 0, "skipped": 0}
+    # Re-selected and re-sent: 2 attempts from the first call + 1 more here.
+    assert stub_create.call_count == 3
+
+    event_after_second_call = await _fetch_event(session_factory, event_id)
+    assert event_after_second_call.related_at is not None
