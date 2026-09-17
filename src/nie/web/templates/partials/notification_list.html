@@ -1,0 +1,75 @@
+<div id="notification-list">
+  {% for notification in notifications %}
+  <article class="{% if notification.read_at is none %}notification-unread{% else %}notification-read{% endif %}">
+    {% if notification.read_at is none %}
+    <span class="notification-unread-badge">Unread</span>
+    {% endif %}
+
+    <h3>{{ notification.payload.title }}</h3>
+
+    <section style="background-color: #eef6ff; border-left: 4px solid #3388ff; padding: 0.5rem 1rem;">
+      <h4>What happened</h4>
+      <p>{{ notification.payload.fact_summary }}</p>
+    </section>
+
+    <section style="background-color: #fff6e6; border-left: 4px solid #cc8800; padding: 0.5rem 1rem;">
+      <h4>Why it matters</h4>
+      <p>{{ notification.payload.interpretation }}</p>
+      <p>{{ notification.payload.importance_rationale }}</p>
+    </section>
+
+    <p>
+      {% for category in notification.payload.categories %}
+      <span>{{ category }}</span>
+      {% else %}
+      <span>No categories</span>
+      {% endfor %}
+    </p>
+
+    <p>Importance: {{ notification.payload.importance }}</p>
+
+    <p>
+      Potential impact: {{ notification.payload.impact_direction }}
+      &mdash; Confidence: {{ notification.payload.impact_confidence }}
+    </p>
+
+    {% if notification.payload.related_events %}
+    <section>
+      <h4>Relevant historical context</h4>
+      <ul>
+        {% for related in notification.payload.related_events %}
+        <li>
+          {{ related.relation }}:
+          <a href="/events/{{ related.event_id }}">{{ related.title }}</a>
+        </li>
+        {% endfor %}
+      </ul>
+    </section>
+    {% endif %}
+
+    <section>
+      <h4>Sources</h4>
+      <ul>
+        {% for source in notification.payload.sources %}
+        <li>
+          <a href="{{ source.url }}" target="_blank" rel="noopener noreferrer">{{ source.title }}</a>
+          &mdash; {{ source.source_name }}
+        </li>
+        {% endfor %}
+      </ul>
+    </section>
+
+    {% if notification.read_at is none %}
+    <button
+      hx-post="/notifications/{{ notification.id }}/read"
+      hx-target="#notification-list"
+      hx-swap="outerHTML"
+    >
+      Mark read
+    </button>
+    {% endif %}
+  </article>
+  {% else %}
+  <p>No notifications yet.</p>
+  {% endfor %}
+</div>
