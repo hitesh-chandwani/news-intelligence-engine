@@ -68,4 +68,26 @@
       {% endfor %}
     </ul>
   </section>
+
+  <section>
+    <h3>Feedback</h3>
+    {% if feedback_submitted %}
+    <p class="feedback-confirmation">Feedback recorded: {{ feedback_submitted }}</p>
+    {% endif %}
+    <button hx-post="/events/{{ event.id }}/feedback?verdict=useful" hx-target="#event-detail" hx-swap="outerHTML">
+      Useful
+    </button>
+    <button hx-post="/events/{{ event.id }}/feedback?verdict=not_useful" hx-target="#event-detail" hx-swap="outerHTML">
+      Not useful
+    </button>
+    <button hx-post="/events/{{ event.id }}/feedback?verdict=too_many_similar" hx-target="#event-detail" hx-swap="outerHTML">
+      Too many similar
+    </button>
+    <button hx-post="/events/{{ event.id }}/feedback?verdict=more_like_this" hx-target="#event-detail" hx-swap="outerHTML">
+      More like this
+    </button>
+    <button hx-post="/events/{{ event.id }}/feedback?verdict=less_of_this" hx-target="#event-detail" hx-swap="outerHTML">
+      Less of this
+    </button>
+  </section>
 </div>

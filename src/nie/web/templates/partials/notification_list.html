@@ -68,6 +68,48 @@
       Mark read
     </button>
     {% endif %}
+
+    <section>
+      <h4>Feedback</h4>
+      {% if notification.event_id == feedback_submitted_event_id %}
+      <p class="feedback-confirmation">Feedback recorded: {{ feedback_submitted_verdict }}</p>
+      {% endif %}
+      <button
+        hx-post="/events/{{ notification.event_id }}/feedback?verdict=useful"
+        hx-target="#notification-list"
+        hx-swap="outerHTML"
+      >
+        Useful
+      </button>
+      <button
+        hx-post="/events/{{ notification.event_id }}/feedback?verdict=not_useful"
+        hx-target="#notification-list"
+        hx-swap="outerHTML"
+      >
+        Not useful
+      </button>
+      <button
+        hx-post="/events/{{ notification.event_id }}/feedback?verdict=too_many_similar"
+        hx-target="#notification-list"
+        hx-swap="outerHTML"
+      >
+        Too many similar
+      </button>
+      <button
+        hx-post="/events/{{ notification.event_id }}/feedback?verdict=more_like_this"
+        hx-target="#notification-list"
+        hx-swap="outerHTML"
+      >
+        More like this
+      </button>
+      <button
+        hx-post="/events/{{ notification.event_id }}/feedback?verdict=less_of_this"
+        hx-target="#notification-list"
+        hx-swap="outerHTML"
+      >
+        Less of this
+      </button>
+    </section>
   </article>
   {% else %}
   <p>No notifications yet.</p>
