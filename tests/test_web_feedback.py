@@ -275,6 +275,87 @@ async def test_hx_request_notification_list_target_gets_notification_list_fragme
     assert "Feedback recorded: not_useful" in response.text
 
 
+async def test_non_blank_note_persists_trimmed(
+    session_factory: async_sessionmaker[AsyncSession],
+    silver_watch_id: uuid.UUID,
+    seeded_client: AsyncClient,
+) -> None:
+    """A non-blank `note` form field, submitted alongside a verdict, is
+    persisted on the `feedback` row with leading/trailing whitespace
+    stripped (#50).
+    """
+    event_id = await _seed_event(
+        session_factory, silver_watch_id, title=_unique_title("Note non-blank")
+    )
+
+    response = await seeded_client.post(
+        f"/events/{event_id}/feedback?verdict=useful",
+        data={"note": "  Great catch, very relevant  "},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert _is_feedback_response_shaped(body)
+    assert body["note"] == "Great catch, very relevant"
+
+    async with session_factory() as session:
+        result = await session.execute(select(Feedback).where(Feedback.event_id == event_id))
+        rows = result.scalars().all()
+        assert len(rows) == 1
+        assert rows[0].note == "Great catch, very relevant"
+
+
+async def test_no_note_field_persists_null(
+    session_factory: async_sessionmaker[AsyncSession],
+    silver_watch_id: uuid.UUID,
+    seeded_client: AsyncClient,
+) -> None:
+    """Submitting a verdict with no `note` field at all continues to
+    persist `note IS NULL` (regression coverage for #39's existing
+    behavior, unaffected by #50).
+    """
+    event_id = await _seed_event(
+        session_factory, silver_watch_id, title=_unique_title("Note absent")
+    )
+
+    response = await seeded_client.post(f"/events/{event_id}/feedback?verdict=useful")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["note"] is None
+
+    async with session_factory() as session:
+        result = await session.execute(select(Feedback).where(Feedback.event_id == event_id))
+        rows = result.scalars().all()
+        assert len(rows) == 1
+        assert rows[0].note is None
+
+
+async def test_whitespace_only_note_persists_null(
+    session_factory: async_sessionmaker[AsyncSession],
+    silver_watch_id: uuid.UUID,
+    seeded_client: AsyncClient,
+) -> None:
+    """A whitespace-only `note` (e.g. `"   "`) persists `note IS NULL`,
+    not the literal whitespace (#50).
+    """
+    event_id = await _seed_event(
+        session_factory, silver_watch_id, title=_unique_title("Note whitespace-only")
+    )
+
+    response = await seeded_client.post(
+        f"/events/{event_id}/feedback?verdict=useful",
+        data={"note": "   "},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["note"] is None
+
+    async with session_factory() as session:
+        result = await session.execute(select(Feedback).where(Feedback.event_id == event_id))
+        rows = result.scalars().all()
+        assert len(rows) == 1
+        assert rows[0].note is None
+
+
 async def test_plain_request_gets_json(
     session_factory: async_sessionmaker[AsyncSession],
     silver_watch_id: uuid.UUID,
