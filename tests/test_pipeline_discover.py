@@ -45,6 +45,7 @@ from nie.models import (
     EventCategory,
     EventRelation,
     EventSource,
+    Notification,
     NotificationPreference,
     Source,
     Watch,
@@ -132,10 +133,23 @@ async def _delete_silver_watch_and_dependents(session: AsyncSession) -> None:
     row has no problem persisting on its own); without this, `DELETE FROM
     watch` below fails its `event.watch_id` FK check forever once any such
     row exists.
+
+    `Notification` rows are deleted here too (scoped by `watch_id`, before
+    `Event`/`Source`/`Watch`) for the exact same reason, one task later:
+    issue #38's `tests/test_web_notifications.py` deliberately leaves the
+    `Event` + `Notification` rows it creates in place against the *real*
+    Silver watch (same "seed it yourself, don't clean up" approach
+    `test_web_events.py` established), and both
+    `Notification.event_id`/`Notification.watch_id` are plain
+    (non-cascading) foreign keys -- without this, `DELETE FROM event`/
+    `DELETE FROM watch` below would fail their FK checks forever once any
+    such row exists, exactly as `Event` rows did for #37 before this
+    helper's `Event`-deletion block above was added.
     """
     watch_id = await _get_silver_watch_id(session)
     if watch_id is None:
         return
+    await session.execute(delete(Notification).where(Notification.watch_id == watch_id))
     event_ids = list(
         (await session.execute(select(Event.id).where(Event.watch_id == watch_id)))
         .scalars()
