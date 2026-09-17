@@ -15,7 +15,16 @@ from datetime import datetime
 from typing import Any
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Text, UniqueConstraint, Uuid, func
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Integer,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    func,
+)
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -86,6 +95,14 @@ class Source(Base):
     since every processed source now moves off `status="extracted"`
     (either straight to `"processed"` for a `noise` verdict, or to
     `"adjudicated"` for `new`/`existing`).
+
+    ``extract_attempts`` is added by #45: `Integer`, `nullable=False`,
+    `server_default="0"`, incremented by `extract_stage` (#20) every time
+    it actually attempts an extraction for the row, used to cap retries
+    of `status="extract_failed"` rows (`extract_attempts <
+    max_extract_attempts` in the stage's selection query) rather than
+    retrying them forever. No new terminal status / `ck_source_status`
+    change -- a capped-out row stays `status="extract_failed"`.
     """
 
     __tablename__ = "source"
@@ -117,6 +134,7 @@ class Source(Base):
     )
     content: Mapped[str | None] = mapped_column(Text)
     extracted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    extract_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     entities: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(384))
     status: Mapped[str] = mapped_column(Text, nullable=False)

@@ -125,6 +125,7 @@ even though the MVP seeds exactly one Watch. Timestamps are `timestamptz`.
 | discovered_at | timestamptz | |
 | content | text null | full extracted text |
 | extracted_at | timestamptz null | |
+| extract_attempts | integer, default `0` | incremented per extraction attempt; caps retry of `extract_failed` rows at `MAX_EXTRACT_ATTEMPTS` |
 | entities | jsonb | `["Fresnillo", "Mexico", "solar"]` |
 | embedding | `vector(384)` null | over title + content summary (FastEmbed bge-small-en-v1.5) |
 | status | text | `discovered` \| `extracted` \| `extract_failed` \| `triaged_out` \| `processed` |
@@ -423,6 +424,7 @@ uses `TrafilaturaExtractor` (local CPU, zero cost). A provider that already retu
 | `POLL_INTERVAL_MINUTES` | `60` | Scheduler cadence |
 | `NOTIFY_MIN_IMPORTANCE` | `medium` | Seed for `notification_preference` |
 | `DEDUP_WINDOW_DAYS` | `14` | Candidate recall window |
+| `MAX_EXTRACT_ATTEMPTS` | `3` | Cap on `extract` stage retries per `source` row before it stops being retried |
 
 ---
 
