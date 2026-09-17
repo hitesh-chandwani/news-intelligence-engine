@@ -92,6 +92,19 @@ that its stats have the expected shape; `tests/test_pipeline_relate.py`
 owns relate's actual business-logic coverage. Same "not in the issue's
 own Files: list, but wiring into STAGE_REGISTRY breaks this pre-existing
 end-to-end assertion otherwise" precedent as #24/#25/#26/#28 above.
+
+`notify_stage` (#48) is now real too, and it's the last placeholder --
+`STAGE_REGISTRY` has no `_not_yet_implemented` entries left after this.
+Unlike `triage`/`adjudicate`/`synthesize`/`score`/`relate`, it takes no
+`client` parameter at all (`design.md` §5 stage 10's Model column is
+`--`), so there's no `LLMClient` to stub here. Its own selection (no
+prior `notification` row for the event, or `last_material_update_at`
+past the latest one's `created_at`) has no `watch_id` filter either, so
+-- like `relate`'s -- this test doesn't assert its exact counts, only
+that its stats have the expected shape; `tests/test_pipeline_notify_stage.py`
+owns notify's actual business-logic coverage. Same "not in the issue's
+own Files: list, but wiring into STAGE_REGISTRY breaks this pre-existing
+end-to-end assertion otherwise" precedent as #24/#25/#26/#28/#29 above.
 """
 
 from collections.abc import AsyncIterator
@@ -353,18 +366,31 @@ async def test_all_stages_running_end_to_end_produce_an_ok_run(
         assert set(run.stats["relate"]) == {"related", "skipped"}
         assert isinstance(run.stats["relate"]["related"], int)
         assert isinstance(run.stats["relate"]["skipped"], int)
-        for name, _ in STAGE_REGISTRY:
-            if name not in (
-                "discover",
-                "extract",
-                "triage",
-                "embed",
-                "adjudicate",
-                "synthesize",
-                "score",
-                "relate",
-            ):
-                assert run.stats[name] == {}
+        # notify_stage (#48) is now real too, same shape-only treatment as
+        # relate's above: its own selection (no prior `notification` row, or
+        # `last_material_update_at` past the latest one's `created_at`) has
+        # no `watch_id` filter either, so rows left behind by other test
+        # files sharing this never-truncated DB can make its exact counts
+        # non-deterministic here. Unlike triage/adjudicate/synthesize/score/
+        # relate, it needs no `LLMClient` stub -- `design.md` §5 stage 10 has
+        # no Model, so `notify_stage` never constructs one.
+        assert set(run.stats["notify"]) == {"notified", "gated_out", "skipped_no_preference"}
+        assert isinstance(run.stats["notify"]["notified"], int)
+        assert isinstance(run.stats["notify"]["gated_out"], int)
+        assert isinstance(run.stats["notify"]["skipped_no_preference"], int)
+        # Every `STAGE_REGISTRY` entry is a real stage now -- nothing left
+        # mapping to the shared `_not_yet_implemented` no-op placeholder.
+        assert {name for name, _ in STAGE_REGISTRY} == {
+            "discover",
+            "extract",
+            "triage",
+            "embed",
+            "adjudicate",
+            "synthesize",
+            "score",
+            "relate",
+            "notify",
+        }
 
 
 async def test_mixed_stages_produce_a_partial_run_and_keep_running_after_a_failure(
