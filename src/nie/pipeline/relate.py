@@ -20,11 +20,12 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, NamedTuple
 
 from pydantic import BaseModel, Field, ValidationError
-from sqlalchemy import exists, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nie.llm.client import LLMClient
@@ -182,17 +183,17 @@ async def relate_stage(session: AsyncSession, *, client: LLMClient | None = None
     same as `adjudicate_stage`/`score_stage`.
 
     Selects rows via `select(Event).where(Event.relevance.isnot(None),
-    ~exists().where(EventRelation.from_event_id == Event.id))` and
-    processes them sequentially (no concurrency), same style as
-    `adjudicate_stage`/`score_stage`. `relevance IS NOT NULL` means
-    "scored" (no special-casing by value, same "not this stage's job to
-    gate on `irrelevant`" precedent `score_stage` set). "No existing
-    outbound `event_relation` row" means this event has never had >=1
-    relation persisted for it by a prior call -- once it does, the
-    `~exists(...)` clause excludes it from every future selection (see
-    the issue's "Known, accepted gap" section for the one case this
-    doesn't cover: an event whose *every* call legitimately yields zero
-    surviving relations is reselected forever -- #47, out of scope here).
+    Event.related_at.is_(None))` and processes them sequentially (no
+    concurrency), same style as `adjudicate_stage`/`score_stage`.
+    `relevance IS NOT NULL` means "scored" (no special-casing by value,
+    same "not this stage's job to gate on `irrelevant`" precedent
+    `score_stage` set). `related_at IS NULL` means this event has never
+    had a successfully-parsed `RelationSet` response recorded for it by a
+    prior call -- once `related_at` is set, an event is excluded from
+    every future selection *regardless of how many relations it ended up
+    with*, including zero (#47; this replaces the older "no existing
+    outbound `event_relation` row" criterion, which reselected
+    zero-relation events forever).
 
     For each row: calls `_find_candidates` (merges `find_nearest_events` +
     `find_entity_overlapping_events`, tags, loads full `Event` rows),
@@ -202,16 +203,24 @@ async def relate_stage(session: AsyncSession, *, client: LLMClient | None = None
     A `json.JSONDecodeError`/`pydantic.ValidationError` still raised after
     `call_structured`'s own internal validate-then-retry-once is a
     whole-event failure: the event's `event_relation` rows are left
-    completely unchanged (none added) and it is counted under
-    `"skipped"`; the loop continues to the next event. Any other
+    completely unchanged (none added), `related_at` is left unset (same
+    "leave the row unmodified, retry next run" precedent #45/#46 set for
+    `extract_attempts`/`score_attempts`, though this stage has no
+    attempt cap yet -- see the issue's "Out of scope"), and it is counted
+    under `"skipped"`; the loop continues to the next event. Any other
     exception propagates out of `relate_stage` uncaught, same precedent
     as `score_stage`/`adjudicate_stage`.
 
-    On a successful, structurally-valid `RelationSet`, each
-    `ProposedRelation` is filtered independently (an event's other, valid
-    proposals are never discarded because one entry in the same response
-    is bad) -- none of these three checks fail the whole event or count
-    it as `"skipped"`:
+    On a successful, structurally-valid `RelationSet`, `event.related_at`
+    is set to `datetime.now(UTC)` regardless of how many relations survive
+    filtering below -- including zero, whether because the LLM proposed
+    none at all or because every proposal was dropped as
+    hallucinated/self-relating -- mirroring `Source.extracted_at`'s "set
+    once on a successful pass" semantics (#47). Each `ProposedRelation` is
+    then filtered independently (an event's other, valid proposals are
+    never discarded because one entry in the same response is bad) --
+    none of these three checks fail the whole event or count it as
+    `"skipped"`:
 
     - Dropped if `event_id` is not in this event's merged candidate id
       set (hallucinated id) -- mirrors `adjudicate_stage`'s "not in
@@ -236,7 +245,8 @@ async def relate_stage(session: AsyncSession, *, client: LLMClient | None = None
     event whose only proposals were all filtered out, or whose
     `RelationSet` was legitimately empty, counts toward neither
     `"related"` nor `"skipped"` -- it simply produced zero rows this pass
-    (the #47 gap, not an error).
+    (not an error; `related_at` is still set for it, per #47, so it is
+    not reselected on a future call).
     """
     if client is None:
         client = LLMClient()
@@ -244,7 +254,7 @@ async def relate_stage(session: AsyncSession, *, client: LLMClient | None = None
     result = await session.execute(
         select(Event).where(
             Event.relevance.isnot(None),
-            ~exists().where(EventRelation.from_event_id == Event.id),
+            Event.related_at.is_(None),
         )
     )
     events = result.scalars().all()
@@ -264,6 +274,11 @@ async def relate_stage(session: AsyncSession, *, client: LLMClient | None = None
             continue
 
         assert isinstance(relation_set, RelationSet)
+
+        # Set once per successful, structurally-valid parse -- regardless
+        # of how many relations survive filtering below, including zero
+        # -- so this event is never reselected by a future call (#47).
+        event.related_at = datetime.now(UTC)
 
         existing_result = await session.execute(
             select(EventRelation.to_event_id, EventRelation.relation).where(

@@ -32,13 +32,14 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 from alembic.command import upgrade
 from alembic.config import Config
-from sqlalchemy import exists, select, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nie.config import Settings
@@ -109,25 +110,25 @@ async def _clear_stale_scored_unrelated_events(
     selection.
 
     `relate_stage`'s selection query is global -- `Event.relevance.isnot(None)`
-    AND no existing outbound `event_relation` row, no `watch_id` filter, by
-    design (per the issue). The Compose Postgres is shared and never
-    truncated between test runs, so a stray scored-but-unrelated event left
-    by an earlier test run (this file's own, or `tests/test_pipeline_score.py`'s)
+    AND `Event.related_at.is_(None)` (#47), no `watch_id` filter, by design
+    (per the issue). The Compose Postgres is shared and never truncated
+    between test runs, so a stray scored-but-unrelated event left by an
+    earlier test run (this file's own, or `tests/test_pipeline_score.py`'s)
     would otherwise leak into a later test's selection -- same
     global-selection-query test-pollution `tests/test_pipeline_adjudicate.py`/
     `tests/test_pipeline_score.py` each hit for their own selection queries.
     Setting `relevance = NULL` is the simplest way to fall out of the
-    `isnot(None)` half of the criterion, without needing a valid
-    `to_event_id` to fabricate a dummy relation row. Runs before each
-    test's own event rows are created, so it only ever touches
-    pre-existing rows, never the test's own fixtures.
+    `isnot(None)` half of the criterion, without needing to touch
+    `related_at` at all. Runs before each test's own event rows are
+    created, so it only ever touches pre-existing rows, never the test's
+    own fixtures.
     """
     async with session_factory() as session:
         await session.execute(
             update(Event)
             .where(
                 Event.relevance.isnot(None),
-                ~exists().where(EventRelation.from_event_id == Event.id),
+                Event.related_at.is_(None),
             )
             .values(relevance=None)
         )
@@ -385,19 +386,20 @@ async def test_relate_stage_does_not_duplicate_pair_already_persisted(
 ) -> None:
     """A `(to_event_id, relation)` pair already persisted for `from_event_id`
     is never re-proposed to the LLM in the first place -- `relate_stage`'s
-    own selection clause (`~exists().where(EventRelation.from_event_id ==
-    Event.id)`) excludes any event with >=1 existing outbound relation from
-    every future selection, so the in-loop "already persisted" filter this
-    guards against (see `relate_stage`'s docstring) can only ever see an
-    empty `persisted_pairs` set for an event it processes -- it is
-    unreachable via `relate_stage`'s own selection gate, same "defense in
-    depth, but assert it explicitly rather than relying on the exclusion
-    silently holding" precedent the issue sets for the self-relation check.
-    This test pins down the resulting observable guarantee: an event with a
-    pre-existing persisted relation is never re-selected, never re-sent to
-    the LLM, and its existing row is left untouched -- so no duplicate and
-    no `IntegrityError` can ever occur for it, regardless of what any stub
-    response would propose."""
+    own selection clause (`Event.related_at.is_(None)`, #47) excludes any
+    event that already completed a `relate_stage` pass from every future
+    selection, so the in-loop "already persisted" filter this guards
+    against (see `relate_stage`'s docstring) can only ever see an empty
+    `persisted_pairs` set for an event it processes -- it is unreachable
+    via `relate_stage`'s own selection gate, same "defense in depth, but
+    assert it explicitly rather than relying on the exclusion silently
+    holding" precedent the issue sets for the self-relation check. This
+    test pins down the resulting observable guarantee: an event with a
+    pre-existing persisted relation (and, per #47, the `related_at` that
+    same earlier pass would have set alongside it) is never re-selected,
+    never re-sent to the LLM, and its existing row is left untouched -- so
+    no duplicate and no `IntegrityError` can ever occur for it, regardless
+    of what any stub response would propose."""
     async with session_factory() as session:
         watch = await _make_watch(session)
         anchor = _make_event(watch.id, embedding=ANCHOR_EMBEDDING, title="Anchor")
@@ -409,6 +411,10 @@ async def test_relate_stage_does_not_duplicate_pair_already_persisted(
         anchor_id = anchor.id
         candidate_id = candidate.id
 
+        # `related_at` is set alongside the relation here because a real
+        # earlier `relate_stage` pass would have set both together (#47) --
+        # this fixture is standing in for that already-completed pass.
+        anchor.related_at = datetime.now(UTC)
         session.add(
             EventRelation(
                 from_event_id=anchor_id,
@@ -472,8 +478,9 @@ async def test_relate_stage_is_idempotent_across_two_calls(
         await session.commit()
 
     assert second_result == {"related": 0, "skipped": 0}
-    # `anchor` already has an outbound relation -- the `~exists(...)`
-    # selection clause excludes it, so the LLM is never called for it again.
+    # `anchor` already has `related_at` set from the first call -- the
+    # `Event.related_at.is_(None)` selection clause (#47) excludes it, so
+    # the LLM is never called for it again.
     assert stub_create.call_count == 1
 
     relations = await _fetch_relations(session_factory, anchor_id)
