@@ -250,6 +250,35 @@ class RelatedEventRef(BaseModel):
     direction: Literal["outgoing", "incoming"]
 
 
+class NotificationResponse(BaseModel):
+    """Response body for `GET /notifications` (array) and
+    `POST /notifications/{id}/read` (single object) (issue #38). Mirrors
+    every column of a `nie.models.Notification` row, including `watch_id`
+    (unlike `ContextItemResponse`'s omission of it for #35) -- unlike the
+    context/preferences/events routers, this one's `POST` targets a
+    notification by its own globally-unique `id` with no Silver-watch
+    scoping in the lookup, so echoing `watch_id` back is useful context.
+
+    `payload` is `dict[str, Any]`, not re-validated against
+    `nie.pipeline.notify.NotificationPayload` here -- by the time a
+    `Notification` row exists, `payload` is already-validated JSONB (that
+    Pydantic model's own `model_dump()`, per #30/#48), so this schema just
+    passes it through. `reason` is narrowed to the exact two string values
+    `nie.models.Notification`'s `CheckConstraint` allows, same
+    "plain `text` column, `Literal` on the wire" pattern used throughout
+    this module.
+    """
+
+    id: uuid.UUID
+    watch_id: uuid.UUID
+    event_id: uuid.UUID
+    reason: Literal["new-event", "material-update"]
+    payload: dict[str, Any]
+    channels_sent: list[str]
+    created_at: datetime
+    read_at: datetime | None
+
+
 class EventDetail(BaseModel):
     """Full response body for `GET /events/{id}` (issue #37): every column
     of a `nie.models.Event` row (`fact_summary`/`interpretation` kept as
