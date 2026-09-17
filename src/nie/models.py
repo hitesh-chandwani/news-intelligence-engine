@@ -505,13 +505,19 @@ class PipelineRun(Base):
     updating `stats` per stage, setting the terminal
     `status`/`finished_at`/`error`) is out of scope here -- that's the
     pipeline runner's concern, #18 onward.
+
+    `'cancelled'` is added to `status`'s allowed values by #53
+    (`alembic/versions/16a090affbd7_add_cancelled_to_pipeline_run_status.py`):
+    a fifth terminal status, set only by `POST /pipeline/runs/{run_id}/cancel`
+    (`src/nie/web/routers/pipeline.py`)'s atomic conditional `UPDATE`, never
+    by `run_pipeline` itself.
     """
 
     __tablename__ = "pipeline_run"
     __table_args__ = (
         CheckConstraint("trigger IN ('schedule', 'manual')", name="ck_pipeline_run_trigger"),
         CheckConstraint(
-            "status IN ('running', 'ok', 'partial', 'failed')",
+            "status IN ('running', 'ok', 'partial', 'failed', 'cancelled')",
             name="ck_pipeline_run_status",
         ),
     )
