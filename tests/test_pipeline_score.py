@@ -84,6 +84,32 @@ FAR_EMBEDDING_6 = _vector(**{"6": 1.0})
 FAR_EMBEDDING_7 = _vector(**{"7": 1.0})
 
 
+@pytest.fixture(autouse=True)
+def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the real shell/`.env` from leaking into `score_stage`'s
+    internal `Settings()` call (#46), same `_isolate_env` pattern
+    `tests/test_pipeline_extract.py` uses for `extract_stage`.
+
+    Only `MAX_SCORE_ATTEMPTS` is deleted -- it's the only `Settings`
+    field `score_stage` reads -- so a stray `MAX_SCORE_ATTEMPTS` in the
+    environment can't desync these tests from the cap value the
+    `max_score_attempts` fixture below reads back off `Settings()`.
+    """
+    monkeypatch.delenv("MAX_SCORE_ATTEMPTS", raising=False)
+
+
+@pytest.fixture
+def max_score_attempts(_isolate_env: None) -> int:
+    """The effective `Settings().max_score_attempts` cap for these tests.
+
+    Read off a real `Settings()` instance (with the environment already
+    isolated by `_isolate_env`) rather than hardcoded, so these tests stay
+    correct against whatever `design.md`-listed default `Settings` defines
+    -- currently `3`.
+    """
+    return Settings().max_score_attempts
+
+
 @pytest.fixture
 def migrated_db() -> None:
     """Run `alembic upgrade head` against the live Compose DB.
@@ -572,7 +598,7 @@ async def test_score_stage_persists_irrelevant_verdict(
         result = await score_stage(session, client=client)
         await session.commit()
 
-    assert result == {"irrelevant": 1, "scored": 0, "skipped": 0}
+    assert result == {"irrelevant": 1, "scored": 0, "skipped": 0, "score_capped": 0}
 
     row = await _fetch_event(session_factory, event_id)
     assert row.relevance == "irrelevant"
@@ -602,7 +628,7 @@ async def test_score_stage_persists_high_relevance_verdict(
         result = await score_stage(session, client=client)
         await session.commit()
 
-    assert result == {"irrelevant": 0, "scored": 1, "skipped": 0}
+    assert result == {"irrelevant": 0, "scored": 1, "skipped": 0, "score_capped": 0}
 
     row = await _fetch_event(session_factory, event_id)
     assert row.relevance == "high"
@@ -633,7 +659,7 @@ async def test_score_stage_persists_unclear_impact_direction(
         result = await score_stage(session, client=client)
         await session.commit()
 
-    assert result == {"irrelevant": 0, "scored": 1, "skipped": 0}
+    assert result == {"irrelevant": 0, "scored": 1, "skipped": 0, "score_capped": 0}
 
     row = await _fetch_event(session_factory, event_id)
     assert row.relevance == "medium"
@@ -673,7 +699,7 @@ async def test_score_stage_skips_row_malformed_on_both_attempts(
         result = await score_stage(session, client=client)
         await session.commit()
 
-    assert result == {"irrelevant": 0, "scored": 0, "skipped": 1}
+    assert result == {"irrelevant": 0, "scored": 0, "skipped": 1, "score_capped": 0}
     assert stub_create.call_count == 2
 
     row = await _fetch_event(session_factory, event_id)
@@ -715,7 +741,7 @@ async def test_score_stage_selection_skips_already_scored_events(
         result = await score_stage(session, client=client)
         await session.commit()
 
-    assert result == {"irrelevant": 0, "scored": 1, "skipped": 0}
+    assert result == {"irrelevant": 0, "scored": 1, "skipped": 0, "score_capped": 0}
     assert stub_create.call_count == 1
 
     already_scored_row = await _fetch_event(session_factory, already_scored_id)
@@ -802,7 +828,7 @@ async def test_score_stage_renders_full_context_bundle_in_prompt(
         result = await score_stage(session, client=client)
         await session.commit()
 
-    assert result == {"irrelevant": 0, "scored": 1, "skipped": 0}
+    assert result == {"irrelevant": 0, "scored": 1, "skipped": 0, "score_capped": 0}
 
     prompt_content = stub_create.call_args.kwargs["messages"][0]["content"]
 
@@ -851,8 +877,156 @@ async def test_score_stage_does_not_touch_fact_summary_or_interpretation(
         result = await score_stage(session, client=client)
         await session.commit()
 
-    assert result == {"irrelevant": 0, "scored": 1, "skipped": 0}
+    assert result == {"irrelevant": 0, "scored": 1, "skipped": 0, "score_capped": 0}
 
     row = await _fetch_event(session_factory, event_id)
     assert row.fact_summary == original_fact_summary
     assert row.interpretation == original_interpretation
+
+
+# ---------------------------------------------------------------------------
+# score_attempts cap (#46)
+# ---------------------------------------------------------------------------
+
+
+async def test_score_stage_retries_event_after_one_failed_attempt(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """(#46) An event that fails validation once (`score_attempts == 1`
+    after the call, still `relevance IS NULL`) is still selected and
+    retried on a second `score_stage` call."""
+    client, stub_create = _client_with_stubbed_create()
+    bad_response = _FakeChatCompletion(
+        '{"relevance": "high", "importance": "high", '
+        '"impact_direction": "bullish", "impact_reason": "", '
+        '"impact_confidence": "high"}'
+    )
+    # Structurally valid JSON but violates `impact_reason`'s min_length on
+    # both of `call_structured`'s internal attempts -> `ValidationError`
+    # propagates, same fixture shape as
+    # `test_score_stage_skips_row_malformed_on_both_attempts`.
+    stub_create.side_effect = [bad_response, bad_response]
+
+    async with session_factory() as session:
+        watch = await _make_watch(session)
+        event = _make_event(watch.id, embedding=ANCHOR_EMBEDDING, title="Retry-once event")
+        session.add(event)
+        await session.commit()
+        event_id = event.id
+
+        result = await score_stage(session, client=client)
+        await session.commit()
+
+    assert result == {"irrelevant": 0, "scored": 0, "skipped": 1, "score_capped": 0}
+    assert stub_create.call_count == 2
+
+    row = await _fetch_event(session_factory, event_id)
+    assert row.relevance is None
+    assert row.score_attempts == 1
+
+    # Second score_stage call: still selected (score_attempts=1 is below
+    # the default cap of 3), and this time succeeds.
+    stub_create.side_effect = None
+    stub_create.return_value = _FakeChatCompletion(
+        '{"relevance": "medium", "importance": "medium", '
+        '"impact_direction": "neutral", "impact_reason": "Valid on retry.", '
+        '"impact_confidence": "medium"}'
+    )
+
+    async with session_factory() as session:
+        second_result = await score_stage(session, client=client)
+        await session.commit()
+
+    assert second_result == {"irrelevant": 0, "scored": 1, "skipped": 0, "score_capped": 0}
+    assert stub_create.call_count == 3
+
+    row = await _fetch_event(session_factory, event_id)
+    assert row.relevance == "medium"
+    assert row.score_attempts == 2
+
+
+async def test_score_stage_skips_event_already_at_cap(
+    session_factory: async_sessionmaker[AsyncSession],
+    max_score_attempts: int,
+) -> None:
+    """(#46) An event already at `score_attempts == max_score_attempts`
+    is excluded by the selection query entirely: `call_structured` is
+    never called for it, its `score_attempts` is left unchanged, and it's
+    counted under `score_capped`, not `skipped`."""
+    client, stub_create = _client_with_stubbed_create()
+    stub_create.return_value = _FakeChatCompletion(
+        '{"relevance": "medium", "importance": "medium", '
+        '"impact_direction": "neutral", "impact_reason": "Should never be sent.", '
+        '"impact_confidence": "medium"}'
+    )
+
+    async with session_factory() as session:
+        watch = await _make_watch(session)
+        event = _make_event(watch.id, embedding=ANCHOR_EMBEDDING, title="Capped event")
+        event.score_attempts = max_score_attempts
+        session.add(event)
+        await session.commit()
+        event_id = event.id
+
+        result = await score_stage(session, client=client)
+        await session.commit()
+
+    assert result == {"irrelevant": 0, "scored": 0, "skipped": 0, "score_capped": 1}
+    assert stub_create.call_count == 0
+
+    row = await _fetch_event(session_factory, event_id)
+    assert row.relevance is None
+    assert row.score_attempts == max_score_attempts
+
+
+async def test_score_stage_excludes_event_after_reaching_cap_boundary(
+    session_factory: async_sessionmaker[AsyncSession],
+    max_score_attempts: int,
+) -> None:
+    """Boundary case (#46): an event that fails validation exactly
+    `max_score_attempts` times across that many separate `score_stage`
+    calls ends the sequence with `score_attempts == max_score_attempts`
+    and `relevance IS NULL`, still having been retried on every one of
+    those calls -- then is excluded starting on the *next* call, the
+    transition from "still retried" to "capped," not just the two
+    steady-state cases the other cap tests cover. Same boundary-test
+    precedent #45 established for `extract_stage`."""
+    client, stub_create = _client_with_stubbed_create()
+    bad_response = _FakeChatCompletion(
+        '{"relevance": "high", "importance": "high", '
+        '"impact_direction": "bullish", "impact_reason": "", '
+        '"impact_confidence": "high"}'
+    )
+
+    async with session_factory() as session:
+        watch = await _make_watch(session)
+        event = _make_event(watch.id, embedding=ANCHOR_EMBEDDING, title="Boundary event")
+        session.add(event)
+        await session.commit()
+        event_id = event.id
+
+    for attempt in range(1, max_score_attempts + 1):
+        stub_create.side_effect = [bad_response, bad_response]
+        async with session_factory() as session:
+            result = await score_stage(session, client=client)
+            await session.commit()
+        assert result == {"irrelevant": 0, "scored": 0, "skipped": 1, "score_capped": 0}
+
+        row = await _fetch_event(session_factory, event_id)
+        assert row.score_attempts == attempt
+        assert row.relevance is None
+
+    # One call past the cap: the row is now excluded rather than retried --
+    # no new call to call_structured for it, and it's counted under
+    # score_capped this time.
+    stub_create.reset_mock(side_effect=True)
+    async with session_factory() as session:
+        next_result = await score_stage(session, client=client)
+        await session.commit()
+
+    assert next_result == {"irrelevant": 0, "scored": 0, "skipped": 0, "score_capped": 1}
+    assert stub_create.call_count == 0
+
+    row = await _fetch_event(session_factory, event_id)
+    assert row.score_attempts == max_score_attempts
+    assert row.relevance is None
