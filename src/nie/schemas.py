@@ -284,14 +284,13 @@ class FeedbackResponse(BaseModel):
     every column of a `nie.models.Feedback` row, including `watch_id`
     (same "echo it back" precedent `NotificationResponse` set) -- this
     endpoint's lookup is by `event_id` in the URL, not scoped to the
-    Silver watch, same as `EventDetail`. `note` is always `None` in
-    practice (this task's UI has no free-text field, see the issue's Out
-    of scope), but the column exists on the row so it's mirrored here too,
-    same as every other `*Response` schema in this module mirroring every
-    column rather than a hand-picked subset. `verdict` is narrowed to the
-    exact 5 string values `nie.models.Feedback`'s `CheckConstraint`
-    allows, same "plain `text` column, `Literal` on the wire" pattern used
-    throughout this module.
+    Silver watch, same as `EventDetail`. `note` reflects the persisted
+    value -- `None` when no note (or a blank/whitespace-only one) was
+    submitted, otherwise the trimmed free text (issue #50 added the UI's
+    optional `<textarea>` and `nie.feedback.submit_feedback`'s
+    normalization). `verdict` is narrowed to the exact 5 string values
+    `nie.models.Feedback`'s `CheckConstraint` allows, same "plain `text`
+    column, `Literal` on the wire" pattern used throughout this module.
     """
 
     id: uuid.UUID

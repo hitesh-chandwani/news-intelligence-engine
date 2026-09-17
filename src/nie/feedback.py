@@ -54,7 +54,9 @@ class EventNotFoundError(ValueError):
     """
 
 
-async def submit_feedback(session: AsyncSession, event_id: uuid.UUID, verdict: str) -> Feedback:
+async def submit_feedback(
+    session: AsyncSession, event_id: uuid.UUID, verdict: str, note: str | None = None
+) -> Feedback:
     """Validate `verdict`, look up `event_id`, and insert one `Feedback`
     row.
 
@@ -67,8 +69,13 @@ async def submit_feedback(session: AsyncSession, event_id: uuid.UUID, verdict: s
     single-watch MVP that watch is always the Silver watch, matching the
     Silver-watch resolution every router in `nie.web.routers` already
     performs (see the issue's Constraints) without a second, separate
-    lookup-by-slug here. `note` is left unset (`None`) -- this task's UI
-    has no free-text field (see the issue's Out of scope).
+    lookup-by-slug here.
+
+    `note` (#50) is optional free text: `None` or blank/whitespace-only is
+    normalized to `None` before insert (an empty textarea must not persist
+    `note=""`); a non-blank `note` is stored with leading/trailing
+    whitespace stripped, otherwise verbatim -- no length cap, `note` is an
+    unconstrained `Text` column (`design.md` §4).
 
     Commits itself before returning (there is no wrapping runner here,
     unlike the pipeline stage functions) and refreshes the row afterward
@@ -84,7 +91,10 @@ async def submit_feedback(session: AsyncSession, event_id: uuid.UUID, verdict: s
     if event is None:
         raise EventNotFoundError(f"No event found with id {event_id!r}")
 
-    feedback = Feedback(watch_id=event.watch_id, event_id=event.id, verdict=verdict)
+    normalized_note = note.strip() if note is not None and note.strip() else None
+    feedback = Feedback(
+        watch_id=event.watch_id, event_id=event.id, verdict=verdict, note=normalized_note
+    )
     session.add(feedback)
     await session.commit()
     await session.refresh(feedback)

@@ -35,7 +35,7 @@ import uuid
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
@@ -455,12 +455,20 @@ async def submit_event_feedback(
     event_id: uuid.UUID,
     verdict: Annotated[str, Query()],
     session: SessionDep,
+    note: Annotated[str | None, Form()] = None,
 ) -> Response:
-    """Persist one feedback verdict against `event_id` (FR-025), via
-    `nie.feedback.submit_feedback`. Bodyless `POST` -- `verdict` is a
+    """Persist one feedback verdict (and optional note, #50) against
+    `event_id` (FR-025), via `nie.feedback.submit_feedback`. `verdict` is a
     required query param (e.g. `?verdict=useful`), modeled on `POST
     /notifications/{id}/read`'s bodyless `<button hx-post="...">` pattern
-    (see the module docstring for why #35/#36's bug classes don't apply).
+    (see the module docstring for why #35/#36's bug classes don't apply);
+    `note` (#50) is an optional form field read from the request body
+    (`application/x-www-form-urlencoded`, htmx's default encoding, via
+    each button's `hx-include` pointing at a shared `<textarea>`) -- a
+    route can mix a `Query()` param and a `Form()` param, so `verdict`
+    stays exactly as #39 shipped it while `note` moves through the body.
+    `submit_feedback` owns all `note` normalization (blank/whitespace-only
+    -> `None`, trim otherwise); this route passes it through unchanged.
 
     `submit_feedback` is HTTP-agnostic and raises a `ValueError` subclass
     per failure mode; that translation happens here, same pattern
@@ -469,6 +477,9 @@ async def submit_event_feedback(
     - `UnknownVerdictError` (verdict not one of the 5
       `Feedback.verdict`-allowed values) -> `422`
     - `EventNotFoundError` (no `event` row with `event_id`) -> `404`
+
+    (Unaffected by whether `note` was supplied -- a bad `verdict` or
+    missing `event_id` behaves identically either way.)
 
     On success, response negotiation follows the `HX-Request` convention
     every other write route in this app uses, but the feedback buttons
@@ -482,16 +493,18 @@ async def submit_event_feedback(
     - `HX-Target: notification-list` -> re-renders `partials/
       notification_list.html` for the feedback's watch (same fragment
       `mark_notification_read` re-renders), with `feedback_submitted_event_id`/
-      `feedback_submitted_verdict` in the template context so the
-      submitting notification's row shows a confirmation.
+      `feedback_submitted_verdict`/`feedback_submitted_note` in the
+      template context so the submitting notification's row shows a
+      confirmation (with the note, when non-blank).
     - anything else while `HX-Request: true` (including `HX-Target:
       event-detail`, or no `HX-Target` at all) -> re-renders `partials/
-      event_detail.html` for `event_id`, with `feedback_submitted` in the
-      template context so the confirmation renders there instead.
+      event_detail.html` for `event_id`, with `feedback_submitted`/
+      `feedback_submitted_note` in the template context so the
+      confirmation renders there instead.
     - no `HX-Request` header -> `200 application/json`, `FeedbackResponse`.
     """
     try:
-        feedback = await submit_feedback(session, event_id, verdict)
+        feedback = await submit_feedback(session, event_id, verdict, note)
     except UnknownVerdictError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except EventNotFoundError as exc:
@@ -509,6 +522,7 @@ async def submit_event_feedback(
                     "notifications": responses,
                     "feedback_submitted_event_id": feedback.event_id,
                     "feedback_submitted_verdict": feedback.verdict,
+                    "feedback_submitted_note": feedback.note,
                 },
             )
 
@@ -517,7 +531,11 @@ async def submit_event_feedback(
         return templates.TemplateResponse(
             request,
             "partials/event_detail.html",
-            {"event": detail, "feedback_submitted": feedback.verdict},
+            {
+                "event": detail,
+                "feedback_submitted": feedback.verdict,
+                "feedback_submitted_note": feedback.note,
+            },
         )
 
     return JSONResponse(content=_to_feedback_response(feedback).model_dump(mode="json"))
