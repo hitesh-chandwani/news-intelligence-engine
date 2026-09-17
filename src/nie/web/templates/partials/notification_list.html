@@ -72,7 +72,16 @@
     <section>
       <h4>Feedback</h4>
       {% if notification.event_id == feedback_submitted_event_id %}
-      <p class="feedback-confirmation">Feedback recorded: {{ feedback_submitted_verdict }}{% if feedback_submitted_note %} &mdash; "{{ feedback_submitted_note }}"{% endif %}</p>
+      <p class="feedback-confirmation">
+        Feedback recorded: {{ feedback_submitted_verdict }}{% if feedback_submitted_note %} &mdash; "{{ feedback_submitted_note }}"{% endif %}
+        <button
+          hx-delete="/events/{{ notification.event_id }}/feedback/{{ feedback_submitted_id }}"
+          hx-target="#notification-list"
+          hx-swap="outerHTML"
+        >
+          Undo
+        </button>
+      </p>
       {% endif %}
       <textarea id="feedback-note-{{ notification.event_id }}" name="note" placeholder="Optional note"></textarea>
       <button

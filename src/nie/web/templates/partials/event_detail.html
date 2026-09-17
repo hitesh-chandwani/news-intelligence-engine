@@ -72,7 +72,16 @@
   <section>
     <h3>Feedback</h3>
     {% if feedback_submitted %}
-    <p class="feedback-confirmation">Feedback recorded: {{ feedback_submitted }}{% if feedback_submitted_note %} &mdash; "{{ feedback_submitted_note }}"{% endif %}</p>
+    <p class="feedback-confirmation">
+      Feedback recorded: {{ feedback_submitted }}{% if feedback_submitted_note %} &mdash; "{{ feedback_submitted_note }}"{% endif %}
+      <button
+        hx-delete="/events/{{ event.id }}/feedback/{{ feedback_submitted_id }}"
+        hx-target="#event-detail"
+        hx-swap="outerHTML"
+      >
+        Undo
+      </button>
+    </p>
     {% endif %}
     <textarea id="feedback-note" name="note" placeholder="Optional note"></textarea>
     <button hx-post="/events/{{ event.id }}/feedback?verdict=useful" hx-include="#feedback-note" hx-target="#event-detail" hx-swap="outerHTML">
