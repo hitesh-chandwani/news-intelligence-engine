@@ -6,14 +6,20 @@ Compose Postgres, never mocked. Follows `tests/test_pipeline_discover.py`'s
 test, not the module-level singleton, so pooled asyncpg connections stay
 bound to this test's own event loop.
 
-Unlike `discover_stage`, `extract_stage` never calls `Settings()` and
-never looks up the Silver watch by its fixed slug -- it only queries
-`source` rows by `status`. So each test below creates its own `Watch`
-row with `unique_slug` (same helper `tests/test_models.py` defines) and
-attaches its `Source` rows to that watch, keeping tests independent of
-each other and of any prior run's leftover rows (the Compose Postgres is
-never truncated between test runs, per `tests/test_pipeline_discover.py`'s
-own module docstring).
+Unlike `discover_stage`, `extract_stage` never looks up the Silver watch
+by its fixed slug -- it only queries `source` rows by `status`. So each
+test below creates its own `Watch` row with `unique_slug` (same helper
+`tests/test_models.py` defines) and attaches its `Source` rows to that
+watch, keeping tests independent of each other and of any prior run's
+leftover rows (the Compose Postgres is never truncated between test
+runs, per `tests/test_pipeline_discover.py`'s own module docstring).
+
+As of #45, `extract_stage` *does* call `Settings()` internally (for
+`max_extract_attempts`), same "construct `Settings()` inside the stage"
+pattern `discover_stage` uses -- so, same as
+`tests/test_pipeline_discover.py`'s `_isolate_env` fixture, `MAX_EXTRACT_
+ATTEMPTS` is deleted from the environment on every test here to keep the
+real shell/`.env` from leaking in and changing the cap tests rely on.
 
 `trafilatura.fetch_url` is monkeypatched through `nie.sources.
 extract_trafilatura.trafilatura`, same pattern as
@@ -38,6 +44,7 @@ from alembic.config import Config
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from nie.config import Settings
 from nie.db import create_engine, create_session_factory
 from nie.models import Source, Watch
 from nie.pipeline.extract import extract_stage
@@ -50,6 +57,32 @@ FIXTURE_HTML = (
 
 SUCCESS_URL = "https://example.com/silver-etf-inflows"
 FAILURE_URL = "https://example.com/unparseable-article"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the real shell/`.env` from leaking into `extract_stage`'s
+    internal `Settings()` call (#45), same `_isolate_env` pattern
+    `tests/test_pipeline_discover.py` uses for `discover_stage`.
+
+    Only `MAX_EXTRACT_ATTEMPTS` is deleted -- it's the only `Settings`
+    field `extract_stage` reads -- so a stray `MAX_EXTRACT_ATTEMPTS` in
+    the environment can't desync these tests from the cap value the
+    `max_extract_attempts` fixture below reads back off `Settings()`.
+    """
+    monkeypatch.delenv("MAX_EXTRACT_ATTEMPTS", raising=False)
+
+
+@pytest.fixture
+def max_extract_attempts(_isolate_env: None) -> int:
+    """The effective `Settings().max_extract_attempts` cap for these tests.
+
+    Read off a real `Settings()` instance (with the environment already
+    isolated by `_isolate_env`) rather than hardcoded, so these tests stay
+    correct against whatever `design.md`-listed default `Settings` defines
+    -- currently `3`.
+    """
+    return Settings().max_extract_attempts
 
 
 def unique_slug(prefix: str) -> str:
@@ -152,6 +185,7 @@ def _make_source(
     status: str,
     content: str | None = None,
     extracted_at: datetime | None = None,
+    extract_attempts: int = 0,
 ) -> Source:
     return Source(
         watch_id=watch_id,
@@ -163,6 +197,7 @@ def _make_source(
         entities=[],
         status=status,
         extracted_at=extracted_at,
+        extract_attempts=extract_attempts,
     )
 
 
@@ -186,7 +221,7 @@ async def test_extract_stage_handles_success_and_failure_mix(
         result = await extract_stage(session)
         await session.commit()
 
-    assert result == {"extracted": 1, "extract_failed": 1}
+    assert result == {"extracted": 1, "extract_failed": 1, "extract_capped": 0}
 
     async with session_factory() as session:
         rows_result = await session.execute(select(Source).where(Source.watch_id == watch_id))
@@ -228,7 +263,7 @@ async def test_extract_stage_skips_provider_supplied_content(
         result = await extract_stage(session)
         await session.commit()
 
-    assert result == {"extracted": 1, "extract_failed": 0}
+    assert result == {"extracted": 1, "extract_failed": 0, "extract_capped": 0}
     assert provider_url not in calls
 
     async with session_factory() as session:
@@ -255,8 +290,17 @@ async def test_extract_stage_retries_extract_failed_row_on_next_call(
         first_result = await extract_stage(session)
         await session.commit()
 
-    assert first_result == {"extracted": 0, "extract_failed": 1}
+    assert first_result == {"extracted": 0, "extract_failed": 1, "extract_capped": 0}
     assert calls.count(FAILURE_URL) == 1
+
+    async with session_factory() as session:
+        rows_result = await session.execute(select(Source).where(Source.watch_id == watch_id))
+        row_after_first = rows_result.scalar_one()
+
+    # A source failing once has extract_attempts=1 after the call (well
+    # below max_extract_attempts=3), so it's still eligible for retry.
+    assert row_after_first.extract_attempts == 1
+    assert row_after_first.status == "extract_failed"
 
     async with session_factory() as session:
         second_result = await extract_stage(session)
@@ -264,7 +308,7 @@ async def test_extract_stage_retries_extract_failed_row_on_next_call(
 
     # Same source row (still status="extract_failed") is retried: the mock
     # call count for its URL increases, and it's counted again this call.
-    assert second_result == {"extracted": 0, "extract_failed": 1}
+    assert second_result == {"extracted": 0, "extract_failed": 1, "extract_capped": 0}
     assert calls.count(FAILURE_URL) == 2
 
     async with session_factory() as session:
@@ -274,6 +318,7 @@ async def test_extract_stage_retries_extract_failed_row_on_next_call(
     assert row.status == "extract_failed"
     assert row.content is None
     assert row.extracted_at is None
+    assert row.extract_attempts == 2
 
 
 async def test_extract_stage_leaves_other_statuses_untouched(
@@ -313,7 +358,7 @@ async def test_extract_stage_leaves_other_statuses_untouched(
         result = await extract_stage(session)
         await session.commit()
 
-    assert result == {"extracted": 0, "extract_failed": 0}
+    assert result == {"extracted": 0, "extract_failed": 0, "extract_capped": 0}
     assert calls == []
 
     async with session_factory() as session:
@@ -327,3 +372,95 @@ async def test_extract_stage_leaves_other_statuses_untouched(
 
     assert by_url["https://example.com/triaged-out"].status == "triaged_out"
     assert by_url["https://example.com/processed"].status == "processed"
+
+
+async def test_extract_stage_skips_source_already_at_cap(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    max_extract_attempts: int,
+) -> None:
+    """A `status="extract_failed"` row already at the cap (#45) is excluded
+    by the selection query entirely: the extractor is never called for its
+    URL, its `extract_attempts` is left unchanged, and it's counted under
+    `extract_capped`, not `extract_failed`.
+    """
+    calls: list[str] = []
+    monkeypatch.setattr(extract_trafilatura.trafilatura, "fetch_url", _fake_fetch_url(calls))
+
+    async with session_factory() as session:
+        watch_id = await _make_watch(session)
+        session.add(
+            _make_source(
+                watch_id,
+                FAILURE_URL,
+                status="extract_failed",
+                extract_attempts=max_extract_attempts,
+            )
+        )
+        await session.commit()
+
+        result = await extract_stage(session)
+        await session.commit()
+
+    assert result == {"extracted": 0, "extract_failed": 0, "extract_capped": 1}
+    assert FAILURE_URL not in calls
+
+    async with session_factory() as session:
+        rows_result = await session.execute(select(Source).where(Source.watch_id == watch_id))
+        row = rows_result.scalar_one()
+
+    assert row.status == "extract_failed"
+    assert row.extract_attempts == max_extract_attempts
+
+
+async def test_extract_stage_excludes_source_after_reaching_cap_boundary(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    max_extract_attempts: int,
+) -> None:
+    """Boundary case (#45): a source that fails exactly
+    `max_extract_attempts` times across that many separate `extract_stage`
+    calls ends the sequence with `extract_attempts == max_extract_attempts`
+    and `status == "extract_failed"`, still having been retried on every
+    one of those calls -- then is excluded starting on the *next* call,
+    the transition from "still retried" to "capped," not just the two
+    steady-state cases the other cap tests cover.
+    """
+    calls: list[str] = []
+    monkeypatch.setattr(extract_trafilatura.trafilatura, "fetch_url", _fake_fetch_url(calls))
+
+    async with session_factory() as session:
+        watch_id = await _make_watch(session)
+        session.add(_make_source(watch_id, FAILURE_URL, status="discovered"))
+        await session.commit()
+
+    for attempt in range(1, max_extract_attempts + 1):
+        async with session_factory() as session:
+            result = await extract_stage(session)
+            await session.commit()
+        assert result == {"extracted": 0, "extract_failed": 1, "extract_capped": 0}
+        assert calls.count(FAILURE_URL) == attempt
+
+    async with session_factory() as session:
+        rows_result = await session.execute(select(Source).where(Source.watch_id == watch_id))
+        row = rows_result.scalar_one()
+
+    assert row.status == "extract_failed"
+    assert row.extract_attempts == max_extract_attempts
+
+    # One call past the cap: the row is now excluded rather than retried --
+    # no new call to the extractor for its URL, and it's counted under
+    # extract_capped this time.
+    async with session_factory() as session:
+        next_result = await extract_stage(session)
+        await session.commit()
+
+    assert next_result == {"extracted": 0, "extract_failed": 0, "extract_capped": 1}
+    assert calls.count(FAILURE_URL) == max_extract_attempts
+
+    async with session_factory() as session:
+        rows_result = await session.execute(select(Source).where(Source.watch_id == watch_id))
+        row = rows_result.scalar_one()
+
+    assert row.status == "extract_failed"
+    assert row.extract_attempts == max_extract_attempts
