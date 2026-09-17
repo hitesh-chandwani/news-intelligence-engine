@@ -188,6 +188,16 @@ class Event(Base):
     **no** ``onupdate`` (unlike ``updated_at``) -- it's set once at insert
     and only bumped by application code on a material change (FR-019),
     independent of ``updated_at`` which auto-bumps on every change.
+
+    ``score_attempts`` is added by #46: `Integer`, `nullable=False`,
+    `server_default="0"`, incremented by `score_stage` (#28) every time it
+    actually calls `client.call_structured` for the row, used to cap
+    retries of `relevance IS NULL` rows (`score_attempts <
+    max_score_attempts` in the stage's selection query) rather than
+    retrying them forever -- the same operational fix #45 established for
+    `source.extract_attempts`, applied by symmetry to `event`/score. No
+    new terminal state / column -- `event` has no `status` column at all,
+    unlike `source`, so a capped-out row simply stays `relevance IS NULL`.
     """
 
     __tablename__ = "event"
@@ -226,6 +236,7 @@ class Event(Base):
     impact_confidence: Mapped[str | None] = mapped_column(Text)
     entities: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     embedding: Mapped[list[float]] = mapped_column(Vector(384), nullable=False)
+    score_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     last_material_update_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

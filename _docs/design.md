@@ -148,6 +148,7 @@ even though the MVP seeds exactly one Watch. Timestamps are `timestamptz`.
 | impact_confidence | text | `low` \| `medium` \| `high` |
 | entities | jsonb | |
 | embedding | `vector(384)` | for dedup / relatedness (FastEmbed bge-small-en-v1.5) |
+| score_attempts | integer, default `0` | incremented per `score_stage` call attempt; caps retry of `relevance IS NULL` rows at `MAX_SCORE_ATTEMPTS` |
 | last_material_update_at | timestamptz | bumped only on material change (FR-019) |
 | created_at, updated_at | timestamptz | |
 
@@ -217,7 +218,7 @@ wraps network calls. Every stage writes counters into `pipeline_run.stats`.
 | 5 | **match** | — | FR-008, FR-009 | pgvector cosine search over `event.embedding` for events within `DEDUP_WINDOW_DAYS`. Produce a candidate set (may be empty). |
 | 6 | **adjudicate** | Gemini 2.0 Flash (structured) | FR-008, FR-009, FR-019 | Given the source + candidate events, decide: `new` \| `existing(event_id)` \| `noise`, plus `materiality: none \| minor \| material`. |
 | 7 | **synthesize** | Gemini 2.0 Flash (structured) | FR-010, FR-011, FR-016 | `new` → build the full event record (title, **fact_summary vs interpretation**, event_date, entities, categories). `existing + material` → update the record and bump `last_material_update_at`. Always link `event_source`. |
-| 8 | **score** | Gemini 2.0 Flash (structured) | FR-012, FR-013, FR-014, FR-015 | Assign `relevance`, `importance`, `impact_{direction,reason,confidence}`. Prompt is fed the retrieved context bundle (see §6). |
+| 8 | **score** | Gemini 2.0 Flash (structured) | FR-012, FR-013, FR-014, FR-015 | Assign `relevance`, `importance`, `impact_{direction,reason,confidence}`. Prompt is fed the retrieved context bundle (see §6). Failure → row stays `relevance IS NULL` (retried next run, capped). |
 | 9 | **relate** | Gemini 2.0 Flash (structured) | FR-018 | Link to related historical events → `event_relation` rows. |
 | 10 | **notify** | — | FR-019, FR-020–FR-024 | Emit a `notification` iff: run produced a `new` event **or** a `material` update; **and** `relevance != irrelevant`; **and** `importance >= pref.min_importance`; **and** (`pref.categories` empty or event shares one). Render `payload`, send on `pref.channels` (Telegram / email), record `channels_sent`. |
 
@@ -425,6 +426,7 @@ uses `TrafilaturaExtractor` (local CPU, zero cost). A provider that already retu
 | `NOTIFY_MIN_IMPORTANCE` | `medium` | Seed for `notification_preference` |
 | `DEDUP_WINDOW_DAYS` | `14` | Candidate recall window |
 | `MAX_EXTRACT_ATTEMPTS` | `3` | Cap on `extract` stage retries per `source` row before it stops being retried |
+| `MAX_SCORE_ATTEMPTS` | `3` | Cap on `score` stage retries per `event` row before it stops being retried |
 
 ---
 
