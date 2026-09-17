@@ -7,11 +7,26 @@ anywhere in this module, same precedent `nie.web.routers.watch` (#34),
 not scoped to the Silver watch in its lookup (an id is already globally
 unique), but MVP has exactly one watch so this is moot in practice.
 
-Both endpoints are read-only `GET`s with no JSON-body forms, so neither
+Both `GET` endpoints are read-only with no JSON-body forms, so neither
 the `hx-ext="json-enc"` pitfall nor the checkbox-group serialization
 pitfall #35/#36 hit applies here: there is no such form, and the filter
 form's category control is a native `<select multiple>` (serialized by
 `hx-get` as a plain, always-present query string), not a checkbox group.
+
+`POST /events/{id}/feedback` (#39) lives here rather than in its own
+`nie.web.routers.feedback` module: unlike every other `POST` this app has
+added so far, its `HX-Request` response has to re-render a *rich* fragment
+(`partials/event_detail.html`, with sources/related events/categories
+already loaded) when submitted from the event detail page, and this
+module already owns `_get_event_or_404`/`_build_detail` -- the exact
+helpers that requires. Duplicating that machinery in a new file just to
+keep "one router per resource" would be pure repetition; extending this
+module was the precedent the issue's Constraints left as an explicit
+option, and this is the codebase's existing "don't import another
+router's private helpers, but do avoid outright duplicating a big one"
+tradeoff. It is also bodyless (`?verdict=<value>`, no JSON body), so
+neither #35's `hx-ext="json-enc"` requirement nor #36's checkbox bug class
+applies to it either.
 """
 
 from __future__ import annotations
@@ -26,8 +41,27 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nie.models import Category, Event, EventCategory, EventRelation, EventSource, Source, Watch
-from nie.schemas import EventDetail, EventSourceRef, EventSummary, RelatedEventRef
+from nie.feedback import EventNotFoundError, UnknownVerdictError, submit_feedback
+from nie.models import (
+    Category,
+    Event,
+    EventCategory,
+    EventRelation,
+    EventSource,
+    Feedback,
+    Notification,
+    Source,
+    Watch,
+)
+from nie.notifications.inbox import list_notifications
+from nie.schemas import (
+    EventDetail,
+    EventSourceRef,
+    EventSummary,
+    FeedbackResponse,
+    NotificationResponse,
+    RelatedEventRef,
+)
 from nie.seed.run import SILVER_WATCH_SLUG
 from nie.web.deps import get_session
 
@@ -384,3 +418,106 @@ async def get_event(request: Request, event_id: uuid.UUID, session: SessionDep) 
         return templates.TemplateResponse(request, "event_detail.html", {"event": detail})
 
     return JSONResponse(content=detail.model_dump(mode="json"))
+
+
+def _to_feedback_response(feedback: Feedback) -> FeedbackResponse:
+    return FeedbackResponse(
+        id=feedback.id,
+        watch_id=feedback.watch_id,
+        event_id=feedback.event_id,
+        verdict=feedback.verdict,  # type: ignore[arg-type]
+        note=feedback.note,
+        created_at=feedback.created_at,
+    )
+
+
+def _notification_to_response(notification: Notification) -> NotificationResponse:
+    """Same shape as `nie.web.routers.notifications._to_response` --
+    duplicated here rather than imported, same "don't import another
+    router's private helpers" convention `_all_categories` already
+    established between this module and `preferences.py`.
+    """
+    return NotificationResponse(
+        id=notification.id,
+        watch_id=notification.watch_id,
+        event_id=notification.event_id,
+        reason=notification.reason,  # type: ignore[arg-type]
+        payload=notification.payload,
+        channels_sent=list(notification.channels_sent),
+        created_at=notification.created_at,
+        read_at=notification.read_at,
+    )
+
+
+@router.post("/events/{event_id}/feedback")
+async def submit_event_feedback(
+    request: Request,
+    event_id: uuid.UUID,
+    verdict: Annotated[str, Query()],
+    session: SessionDep,
+) -> Response:
+    """Persist one feedback verdict against `event_id` (FR-025), via
+    `nie.feedback.submit_feedback`. Bodyless `POST` -- `verdict` is a
+    required query param (e.g. `?verdict=useful`), modeled on `POST
+    /notifications/{id}/read`'s bodyless `<button hx-post="...">` pattern
+    (see the module docstring for why #35/#36's bug classes don't apply).
+
+    `submit_feedback` is HTTP-agnostic and raises a `ValueError` subclass
+    per failure mode; that translation happens here, same pattern
+    `mark_notification_read` (#38) uses for `mark_read`'s `ValueError`:
+
+    - `UnknownVerdictError` (verdict not one of the 5
+      `Feedback.verdict`-allowed values) -> `422`
+    - `EventNotFoundError` (no `event` row with `event_id`) -> `404`
+
+    On success, response negotiation follows the `HX-Request` convention
+    every other write route in this app uses, but the feedback buttons
+    render on two different pages with two different `hx-target`s
+    (`#event-detail` on the event detail page, `#notification-list` in the
+    inbox) -- htmx automatically sends the target element's id as the
+    `HX-Target` request header on every request it makes, so that header
+    (not an extra query param the issue's Constraints don't call for)
+    decides which fragment to re-render:
+
+    - `HX-Target: notification-list` -> re-renders `partials/
+      notification_list.html` for the feedback's watch (same fragment
+      `mark_notification_read` re-renders), with `feedback_submitted_event_id`/
+      `feedback_submitted_verdict` in the template context so the
+      submitting notification's row shows a confirmation.
+    - anything else while `HX-Request: true` (including `HX-Target:
+      event-detail`, or no `HX-Target` at all) -> re-renders `partials/
+      event_detail.html` for `event_id`, with `feedback_submitted` in the
+      template context so the confirmation renders there instead.
+    - no `HX-Request` header -> `200 application/json`, `FeedbackResponse`.
+    """
+    try:
+        feedback = await submit_feedback(session, event_id, verdict)
+    except UnknownVerdictError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except EventNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    templates: Jinja2Templates = request.app.state.templates
+    if request.headers.get("HX-Request"):
+        if request.headers.get("HX-Target") == "notification-list":
+            notifications = await list_notifications(session, feedback.watch_id)
+            responses = [_notification_to_response(item) for item in notifications]
+            return templates.TemplateResponse(
+                request,
+                "partials/notification_list.html",
+                {
+                    "notifications": responses,
+                    "feedback_submitted_event_id": feedback.event_id,
+                    "feedback_submitted_verdict": feedback.verdict,
+                },
+            )
+
+        event = await _get_event_or_404(session, feedback.event_id)
+        detail = await _build_detail(session, event)
+        return templates.TemplateResponse(
+            request,
+            "partials/event_detail.html",
+            {"event": detail, "feedback_submitted": feedback.verdict},
+        )
+
+    return JSONResponse(content=_to_feedback_response(feedback).model_dump(mode="json"))
