@@ -389,6 +389,7 @@ uses `TrafilaturaExtractor` (local CPU, zero cost). A provider that already retu
 | `GET /events/{id}` | Event detail: fact/interpretation, impact, sources, related events | FR-027 |
 | `GET /notifications` | In-app inbox; `POST /notifications/{id}/read` | FR-020 |
 | `POST /events/{id}/feedback` | Submit feedback | FR-025 |
+| `DELETE /events/{id}/feedback/{feedback_id}` | Withdraw feedback | FR-025 |
 | `GET /preferences` / `PATCH /preferences` | Importance threshold + categories | FR-023, FR-024 |
 | `POST /pipeline/run` | Trigger a run now | — |
 | `GET /pipeline/runs` | Run history + stats | — |
