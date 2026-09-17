@@ -26,6 +26,13 @@ here by setting `relevance = NULL` (simplest way to fall out of the
 Every embedding used is a hand-authored fixed 384-length float list, same
 precedent as `tests/test_pipeline_match.py`/`tests/test_pipeline_score.py`
 -- no live network call, no real embedding model.
+
+`relate_attempts`/`MAX_RELATE_ATTEMPTS` cap tests (#55) mirror
+`tests/test_pipeline_score.py`'s `score_attempts`/`MAX_SCORE_ATTEMPTS`
+three-case shape (#46): retry-once-then-succeed, at-cap skip, and the
+exact-boundary transition. Same `_isolate_env`/`max_relate_attempts`
+fixture pattern as that file, since `relate_stage` now also constructs
+its own `Settings()` internally (#55).
 """
 
 from __future__ import annotations
@@ -77,6 +84,32 @@ NEAR_EMBEDDING = _vector(**{"0": 1.0})
 # in practice for these small fixtures, but still reachable by entity
 # overlap alone.
 FAR_EMBEDDING = _vector(**{"9": 1.0})
+
+
+@pytest.fixture(autouse=True)
+def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the real shell/`.env` from leaking into `relate_stage`'s
+    internal `Settings()` call (#55), same `_isolate_env` pattern
+    `tests/test_pipeline_score.py` uses for `score_stage`.
+
+    Only `MAX_RELATE_ATTEMPTS` is deleted -- it's the only `Settings`
+    field `relate_stage` reads -- so a stray `MAX_RELATE_ATTEMPTS` in the
+    environment can't desync these tests from the cap value the
+    `max_relate_attempts` fixture below reads back off `Settings()`.
+    """
+    monkeypatch.delenv("MAX_RELATE_ATTEMPTS", raising=False)
+
+
+@pytest.fixture
+def max_relate_attempts(_isolate_env: None) -> int:
+    """The effective `Settings().max_relate_attempts` cap for these tests.
+
+    Read off a real `Settings()` instance (with the environment already
+    isolated by `_isolate_env`) rather than hardcoded, so these tests stay
+    correct against whatever `design.md`-listed default `Settings` defines
+    -- currently `3`.
+    """
+    return Settings().max_relate_attempts
 
 
 @pytest.fixture
@@ -274,7 +307,7 @@ async def test_relate_stage_happy_path_both_candidate_sources(
         result = await relate_stage(session, client=client)
         await session.commit()
 
-    assert result == {"related": 1, "skipped": 0}
+    assert result == {"related": 1, "skipped": 0, "relate_capped": 0}
 
     relations = await _fetch_relations(session_factory, anchor_id)
     by_to_id = {relation.to_event_id: relation for relation in relations}
@@ -318,7 +351,7 @@ async def test_relate_stage_drops_hallucinated_event_id_keeps_valid_relation(
         result = await relate_stage(session, client=client)
         await session.commit()
 
-    assert result == {"related": 1, "skipped": 0}
+    assert result == {"related": 1, "skipped": 0, "relate_capped": 0}
 
     relations = await _fetch_relations(session_factory, anchor_id)
     assert len(relations) == 1
@@ -348,7 +381,7 @@ async def test_relate_stage_drops_self_relation_proposal(
 
     # Zero surviving relations -- counts toward neither "related" nor
     # "skipped" (a legitimately-empty-after-filtering outcome, not an error).
-    assert result == {"related": 0, "skipped": 0}
+    assert result == {"related": 0, "skipped": 0, "relate_capped": 0}
 
     relations = await _fetch_relations(session_factory, anchor_id)
     assert relations == []
@@ -380,7 +413,7 @@ async def test_relate_stage_deduplicates_repeated_pair_within_one_response(
         result = await relate_stage(session, client=client)
         await session.commit()
 
-    assert result == {"related": 1, "skipped": 0}
+    assert result == {"related": 1, "skipped": 0, "relate_capped": 0}
 
     relations = await _fetch_relations(session_factory, anchor_id)
     assert len(relations) == 1
@@ -446,7 +479,7 @@ async def test_relate_stage_does_not_duplicate_pair_already_persisted(
         result = await relate_stage(session, client=client)
         await session.commit()
 
-    assert result == {"related": 0, "skipped": 0}
+    assert result == {"related": 0, "skipped": 0, "relate_capped": 0}
     assert stub_create.call_count == 0
 
     relations = await _fetch_relations(session_factory, anchor_id)
@@ -478,14 +511,14 @@ async def test_relate_stage_is_idempotent_across_two_calls(
         first_result = await relate_stage(session, client=client)
         await session.commit()
 
-    assert first_result == {"related": 1, "skipped": 0}
+    assert first_result == {"related": 1, "skipped": 0, "relate_capped": 0}
     assert stub_create.call_count == 1
 
     async with session_factory() as session:
         second_result = await relate_stage(session, client=client)
         await session.commit()
 
-    assert second_result == {"related": 0, "skipped": 0}
+    assert second_result == {"related": 0, "skipped": 0, "relate_capped": 0}
     # `anchor` already has `related_at` set from the first call -- the
     # `Event.related_at.is_(None)` selection clause (#47) excludes it, so
     # the LLM is never called for it again.
@@ -517,7 +550,7 @@ async def test_relate_stage_skips_event_malformed_on_both_attempts(
         result = await relate_stage(session, client=client)
         await session.commit()
 
-    assert result == {"related": 0, "skipped": 1}
+    assert result == {"related": 0, "skipped": 1, "relate_capped": 0}
     assert stub_create.call_count == 2
 
     relations = await _fetch_relations(session_factory, event_id)
@@ -548,7 +581,7 @@ async def test_relate_stage_selection_requires_scored_and_unrelated(
     # Only `scored_unrelated` is selected -> exactly one LLM call, an empty
     # `RelationSet` -> zero rows, counted toward neither "related" nor
     # "skipped".
-    assert result == {"related": 0, "skipped": 0}
+    assert result == {"related": 0, "skipped": 0, "relate_capped": 0}
     assert stub_create.call_count == 1
 
     relations = await _fetch_relations(session_factory, not_yet_scored_id)
@@ -575,7 +608,7 @@ async def test_relate_stage_handles_empty_candidate_pool(
         result = await relate_stage(session, client=client)
         await session.commit()
 
-    assert result == {"related": 0, "skipped": 0}
+    assert result == {"related": 0, "skipped": 0, "relate_capped": 0}
     assert stub_create.call_count == 1
 
     prompt_content = stub_create.call_args.kwargs["messages"][0]["content"]
@@ -613,7 +646,7 @@ async def test_relate_stage_sets_related_at_on_legitimately_empty_relation_set(
         first_result = await relate_stage(session, client=client)
         await session.commit()
 
-    assert first_result == {"related": 0, "skipped": 0}
+    assert first_result == {"related": 0, "skipped": 0, "relate_capped": 0}
     assert stub_create.call_count == 1
 
     event_after_first_call = await _fetch_event(session_factory, lonely_id)
@@ -623,7 +656,7 @@ async def test_relate_stage_sets_related_at_on_legitimately_empty_relation_set(
         second_result = await relate_stage(session, client=client)
         await session.commit()
 
-    assert second_result == {"related": 0, "skipped": 0}
+    assert second_result == {"related": 0, "skipped": 0, "relate_capped": 0}
     # Not reselected -- the LLM is never called for it again.
     assert stub_create.call_count == 1
 
@@ -659,7 +692,7 @@ async def test_relate_stage_sets_related_at_when_only_proposal_filtered_to_zero(
         first_result = await relate_stage(session, client=client)
         await session.commit()
 
-    assert first_result == {"related": 0, "skipped": 0}
+    assert first_result == {"related": 0, "skipped": 0, "relate_capped": 0}
     assert stub_create.call_count == 1
 
     event_after_first_call = await _fetch_event(session_factory, anchor_id)
@@ -672,7 +705,7 @@ async def test_relate_stage_sets_related_at_when_only_proposal_filtered_to_zero(
         second_result = await relate_stage(session, client=client)
         await session.commit()
 
-    assert second_result == {"related": 0, "skipped": 0}
+    assert second_result == {"related": 0, "skipped": 0, "relate_capped": 0}
     # Not reselected -- the LLM is never called for it again, even though
     # zero relations were ever actually persisted for this event.
     assert stub_create.call_count == 1
@@ -705,7 +738,7 @@ async def test_relate_stage_keeps_related_at_null_and_resends_on_repeated_valida
         first_result = await relate_stage(session, client=client)
         await session.commit()
 
-    assert first_result == {"related": 0, "skipped": 1}
+    assert first_result == {"related": 0, "skipped": 1, "relate_capped": 0}
     assert stub_create.call_count == 2
 
     event_after_first_call = await _fetch_event(session_factory, event_id)
@@ -720,9 +753,142 @@ async def test_relate_stage_keeps_related_at_null_and_resends_on_repeated_valida
         second_result = await relate_stage(session, client=client)
         await session.commit()
 
-    assert second_result == {"related": 0, "skipped": 0}
+    assert second_result == {"related": 0, "skipped": 0, "relate_capped": 0}
     # Re-selected and re-sent: 2 attempts from the first call + 1 more here.
     assert stub_create.call_count == 3
 
     event_after_second_call = await _fetch_event(session_factory, event_id)
     assert event_after_second_call.related_at is not None
+
+
+# ---------------------------------------------------------------------------
+# relate_attempts cap (#55)
+# ---------------------------------------------------------------------------
+
+
+async def test_relate_stage_retries_event_after_one_failed_attempt(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """(#55) An event that fails validation once (`relate_attempts == 1`
+    after the call, still `related_at IS NULL`) is still selected and
+    retried on a second `relate_stage` call."""
+    client, stub_create = _client_with_stubbed_create()
+    # Structurally invalid JSON on both of `call_structured`'s internal
+    # attempts -> `json.JSONDecodeError` propagates, same fixture shape as
+    # `test_relate_stage_skips_event_malformed_on_both_attempts`.
+    stub_create.side_effect = [
+        _FakeChatCompletion("not valid json"),
+        _FakeChatCompletion("still not valid json"),
+    ]
+
+    async with session_factory() as session:
+        watch = await _make_watch(session)
+        event = _make_event(watch.id, embedding=ANCHOR_EMBEDDING, title="Retry-once event")
+        session.add(event)
+        await session.commit()
+        event_id = event.id
+
+        result = await relate_stage(session, client=client)
+        await session.commit()
+
+    assert result == {"related": 0, "skipped": 1, "relate_capped": 0}
+    assert stub_create.call_count == 2
+
+    row = await _fetch_event(session_factory, event_id)
+    assert row.related_at is None
+    assert row.relate_attempts == 1
+
+    # Second relate_stage call: still selected (relate_attempts=1 is below
+    # the default cap of 3), and this time succeeds.
+    stub_create.side_effect = None
+    stub_create.return_value = _FakeChatCompletion('{"relations": []}')
+
+    async with session_factory() as session:
+        second_result = await relate_stage(session, client=client)
+        await session.commit()
+
+    assert second_result == {"related": 0, "skipped": 0, "relate_capped": 0}
+    assert stub_create.call_count == 3
+
+    row = await _fetch_event(session_factory, event_id)
+    assert row.related_at is not None
+    assert row.relate_attempts == 2
+
+
+async def test_relate_stage_skips_event_already_at_cap(
+    session_factory: async_sessionmaker[AsyncSession],
+    max_relate_attempts: int,
+) -> None:
+    """(#55) An event already at `relate_attempts == max_relate_attempts`
+    is excluded by the selection query entirely: `call_structured` is
+    never called for it, its `relate_attempts` is left unchanged, and it's
+    counted under `relate_capped`, not `skipped`."""
+    client, stub_create = _client_with_stubbed_create()
+    stub_create.return_value = _FakeChatCompletion('{"relations": []}')
+
+    async with session_factory() as session:
+        watch = await _make_watch(session)
+        event = _make_event(watch.id, embedding=ANCHOR_EMBEDDING, title="Capped event")
+        event.relate_attempts = max_relate_attempts
+        session.add(event)
+        await session.commit()
+        event_id = event.id
+
+        result = await relate_stage(session, client=client)
+        await session.commit()
+
+    assert result == {"related": 0, "skipped": 0, "relate_capped": 1}
+    assert stub_create.call_count == 0
+
+    row = await _fetch_event(session_factory, event_id)
+    assert row.related_at is None
+    assert row.relate_attempts == max_relate_attempts
+
+
+async def test_relate_stage_excludes_event_after_reaching_cap_boundary(
+    session_factory: async_sessionmaker[AsyncSession],
+    max_relate_attempts: int,
+) -> None:
+    """Boundary case (#55): an event that fails validation exactly
+    `max_relate_attempts` times across that many separate `relate_stage`
+    calls ends the sequence with `relate_attempts == max_relate_attempts`
+    and `related_at IS NULL`, still having been retried on every one of
+    those calls -- then is excluded starting on the *next* call, the
+    transition from "still retried" to "capped," not just the two
+    steady-state cases the other cap tests cover. Same boundary-test
+    precedent #45/#46 established for `extract_stage`/`score_stage`."""
+    client, stub_create = _client_with_stubbed_create()
+    bad_response = _FakeChatCompletion("not valid json")
+
+    async with session_factory() as session:
+        watch = await _make_watch(session)
+        event = _make_event(watch.id, embedding=ANCHOR_EMBEDDING, title="Boundary event")
+        session.add(event)
+        await session.commit()
+        event_id = event.id
+
+    for attempt in range(1, max_relate_attempts + 1):
+        stub_create.side_effect = [bad_response, bad_response]
+        async with session_factory() as session:
+            result = await relate_stage(session, client=client)
+            await session.commit()
+        assert result == {"related": 0, "skipped": 1, "relate_capped": 0}
+
+        row = await _fetch_event(session_factory, event_id)
+        assert row.relate_attempts == attempt
+        assert row.related_at is None
+
+    # One call past the cap: the row is now excluded rather than retried --
+    # no new call to call_structured for it, and it's counted under
+    # relate_capped this time.
+    stub_create.reset_mock(side_effect=True)
+    async with session_factory() as session:
+        next_result = await relate_stage(session, client=client)
+        await session.commit()
+
+    assert next_result == {"related": 0, "skipped": 0, "relate_capped": 1}
+    assert stub_create.call_count == 0
+
+    row = await _fetch_event(session_factory, event_id)
+    assert row.relate_attempts == max_relate_attempts
+    assert row.related_at is None
