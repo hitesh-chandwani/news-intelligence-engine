@@ -17,6 +17,8 @@ criteria).
 
 from __future__ import annotations
 
+import asyncio
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import select
@@ -38,6 +40,7 @@ SCHEDULE_TRIGGER = "schedule"
 
 async def scheduler_tick(
     session_factory: async_sessionmaker[AsyncSession] = async_session_factory,
+    lock: asyncio.Lock | None = None,
 ) -> None:
     """One scheduler interval firing, directly callable (not only via the
     real APScheduler interval) so tests never depend on real
@@ -52,6 +55,20 @@ async def scheduler_tick(
     Calls `run_pipeline(session_factory=session_factory,
     trigger="schedule")` only when `watch.status == "enabled"`; a
     disabled watch is also a silent no-op.
+
+    `lock` (issue #43) is the process-local `asyncio.Lock` shared with
+    `POST /pipeline/run`, via `app.state.pipeline_lock`. When it is
+    already held (a manual trigger, or an overlapping tick, is mid-run),
+    this tick skips silently rather than blocking on `lock.acquire()` --
+    an unattended interval firing should never queue up waiting for a
+    previous run to finish, it should just wait for the *next* interval.
+    `lock.locked()` is checked before attempting acquisition (rather than
+    a blocking `async with lock`) for exactly that non-blocking-skip
+    behavior, same pattern `POST /pipeline/run` uses for its immediate
+    `409`. `lock=None` (every one of #40's existing tests, which call
+    `scheduler_tick(session_factory=...)` with no `lock` argument) skips
+    this check entirely and behaves exactly as before this parameter was
+    added.
     """
     async with session_factory() as session:
         result = await session.execute(select(Watch).where(Watch.slug == SILVER_WATCH_SLUG))
@@ -60,17 +77,35 @@ async def scheduler_tick(
     if watch is None or watch.status != "enabled":
         return
 
-    await run_pipeline(session_factory=session_factory, trigger=SCHEDULE_TRIGGER)
+    if lock is None:
+        await run_pipeline(session_factory=session_factory, trigger=SCHEDULE_TRIGGER)
+        return
+
+    if lock.locked():
+        return
+
+    async with lock:
+        await run_pipeline(session_factory=session_factory, trigger=SCHEDULE_TRIGGER)
 
 
-def create_scheduler(settings: Settings | None = None) -> AsyncIOScheduler:
+def create_scheduler(
+    settings: Settings | None = None, lock: asyncio.Lock | None = None
+) -> AsyncIOScheduler:
     """Build (but do not start) an `AsyncIOScheduler` with `scheduler_tick`
     registered on an interval trigger of `Settings().poll_interval_minutes`
     minutes.
 
     `max_instances` is left at APScheduler's default (1), so an
     in-progress `scheduler_tick` call blocks the next interval's job from
-    starting a second, overlapping `run_pipeline` run.
+    starting a second, overlapping `run_pipeline` run via APScheduler's
+    own per-job-id mechanism. That alone does not protect against overlap
+    with `POST /pipeline/run` (a *separate* job id, per issue #43's
+    Constraints -- APScheduler's `max_instances` is enforced per job id,
+    not globally), which is what `lock` (passed through to every
+    `scheduler_tick` call this scheduler fires) is for: the same
+    process-local `asyncio.Lock` instance `_lifespan`
+    (`src/nie/web/app.py`) passes here is also `app.state.pipeline_lock`,
+    shared with the HTTP endpoint.
     """
     settings = settings or Settings()
     scheduler = AsyncIOScheduler()
@@ -78,5 +113,6 @@ def create_scheduler(settings: Settings | None = None) -> AsyncIOScheduler:
         scheduler_tick,
         trigger=IntervalTrigger(minutes=settings.poll_interval_minutes),
         id="pipeline_scheduler_tick",
+        kwargs={"lock": lock},
     )
     return scheduler
