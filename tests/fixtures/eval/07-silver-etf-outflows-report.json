@@ -1,0 +1,20 @@
+{
+  "id": "07-silver-etf-outflows-report",
+  "url": "https://example.com/eval/07-silver-etf-outflows-report",
+  "title": "Silver ETF Holdings Post Third Straight Weekly Decline",
+  "source_name": "Kitco News",
+  "published_at": "2026-05-05T10:00:00+00:00",
+  "entities": [
+    "Silver",
+    "ETF",
+    "SLV",
+    "PSLV"
+  ],
+  "content": "Global silver-backed ETF holdings fell for a third consecutive week, shedding a combined 6.8 million ounces, according to data compiled from the major trusts. The outflows coincide with a stronger US dollar and rising real yields, which have made non-yielding precious metals less attractive to institutional holders in the short term.",
+  "expected": {
+    "decision": "new_event",
+    "matches_fixture": null,
+    "relevance": "high",
+    "importance": "medium"
+  }
+}

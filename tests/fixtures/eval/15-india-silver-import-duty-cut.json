@@ -1,0 +1,19 @@
+{
+  "id": "15-india-silver-import-duty-cut",
+  "url": "https://example.com/eval/15-india-silver-import-duty-cut",
+  "title": "India Cuts Silver Import Duty to Boost Domestic Supply",
+  "source_name": "Economic Times",
+  "published_at": "2026-01-15T06:00:00+00:00",
+  "entities": [
+    "India",
+    "import duty",
+    "regulatory"
+  ],
+  "content": "India's finance ministry announced a cut to the import duty on silver bars, from 15% to 10%, effective immediately, in a move aimed at curbing smuggling and boosting official import volumes ahead of the wedding and festival season. India is one of the world's largest silver consumers, and traders expect the lower duty to meaningfully increase legal import flows in the coming months.",
+  "expected": {
+    "decision": "new_event",
+    "matches_fixture": null,
+    "relevance": "high",
+    "importance": "high"
+  }
+}

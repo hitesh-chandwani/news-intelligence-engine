@@ -1,0 +1,19 @@
+{
+  "id": "11-comex-speculative-long-positioning",
+  "url": "https://example.com/eval/11-comex-speculative-long-positioning",
+  "title": "Speculators Build Largest Net-Long Silver Position in a Year",
+  "source_name": "CFTC Commitment of Traders",
+  "published_at": "2026-03-06T18:00:00+00:00",
+  "entities": [
+    "COMEX",
+    "CFTC",
+    "futures positioning"
+  ],
+  "content": "The latest CFTC Commitment of Traders report shows managed-money speculators increased their net-long position in COMEX silver futures to the highest level in over a year, driven mostly by new long positions rather than short covering. Analysts noted such stretched positioning can precede sharp price swings in either direction if sentiment shifts.",
+  "expected": {
+    "decision": "new_event",
+    "matches_fixture": null,
+    "relevance": "medium",
+    "importance": "medium"
+  }
+}

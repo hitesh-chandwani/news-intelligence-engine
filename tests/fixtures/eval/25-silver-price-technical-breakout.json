@@ -1,0 +1,18 @@
+{
+  "id": "25-silver-price-technical-breakout",
+  "url": "https://example.com/eval/25-silver-price-technical-breakout",
+  "title": "Silver Breaks Above Key Technical Resistance Level",
+  "source_name": "Investing.com",
+  "published_at": "2026-06-02T13:00:00+00:00",
+  "entities": [
+    "technical analysis",
+    "price"
+  ],
+  "content": "Silver futures closed above the $32 level Monday, a price chartists had flagged as a key resistance zone dating back several months. Technical analysts said a confirmed close above the level could open the way toward the next resistance band, though they cautioned the move needs follow-through volume to be meaningful.",
+  "expected": {
+    "decision": "new_event",
+    "matches_fixture": null,
+    "relevance": "medium",
+    "importance": "medium"
+  }
+}

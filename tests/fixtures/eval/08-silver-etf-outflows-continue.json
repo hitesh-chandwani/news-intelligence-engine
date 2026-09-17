@@ -1,0 +1,19 @@
+{
+  "id": "08-silver-etf-outflows-continue",
+  "url": "https://example.com/eval/08-silver-etf-outflows-continue",
+  "title": "Silver ETF Outflows Persist Into Fourth Week",
+  "source_name": "Kitco News",
+  "published_at": "2026-05-12T10:00:00+00:00",
+  "entities": [
+    "Silver",
+    "ETF",
+    "SLV"
+  ],
+  "content": "Silver ETF holdings declined for a fourth straight week, though the pace of outflows slowed to 1.9 million ounces from the prior week's 2.5 million, suggesting the selling pressure identified last week may be moderating.",
+  "expected": {
+    "decision": "existing_event",
+    "matches_fixture": "07-silver-etf-outflows-report",
+    "relevance": "medium",
+    "importance": "low"
+  }
+}

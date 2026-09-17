@@ -1,0 +1,19 @@
+{
+  "id": "18-peru-blockade-lifted",
+  "url": "https://example.com/eval/18-peru-blockade-lifted",
+  "title": "Peru Mine Blockade Lifted After Government Talks",
+  "source_name": "Reuters",
+  "published_at": "2026-08-19T12:00:00+00:00",
+  "entities": [
+    "Peru",
+    "protests",
+    "mining"
+  ],
+  "content": "The road blockades that had cut off a major southern Peru silver-copper mining complex have been lifted following talks between protest leaders and the government, the mine operator confirmed. Concentrate shipments are expected to resume within the week, though the two-week disruption is estimated to have delayed roughly 1.2 million ounces of silver shipments.",
+  "expected": {
+    "decision": "existing_event",
+    "matches_fixture": "17-peru-protests-mine-blockade",
+    "relevance": "high",
+    "importance": "medium"
+  }
+}

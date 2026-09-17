@@ -1,0 +1,20 @@
+{
+  "id": "01-fed-pause-rate-hikes",
+  "url": "https://example.com/eval/01-fed-pause-rate-hikes",
+  "title": "Fed Signals Rate Pause, Silver Jumps 3%",
+  "source_name": "Reuters",
+  "published_at": "2026-07-01T14:00:00+00:00",
+  "entities": [
+    "Federal Reserve",
+    "Silver",
+    "COMEX",
+    "interest rates"
+  ],
+  "content": "The Federal Reserve held its benchmark rate steady on Wednesday and signaled it is likely done raising rates for this cycle, citing cooling inflation data. Silver futures on COMEX jumped 3% within an hour of the announcement as traders priced in lower real yields and a weaker dollar, both of which typically support precious metals. Gold also rose but by a smaller 1.8%, widening the gold-silver ratio's recent narrowing trend. Analysts said the move reflects renewed institutional interest in silver as a monetary hedge heading into the second half of the year.",
+  "expected": {
+    "decision": "new_event",
+    "matches_fixture": null,
+    "relevance": "high",
+    "importance": "high"
+  }
+}

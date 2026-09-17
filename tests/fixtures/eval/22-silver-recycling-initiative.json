@@ -1,0 +1,18 @@
+{
+  "id": "22-silver-recycling-initiative",
+  "url": "https://example.com/eval/22-silver-recycling-initiative",
+  "title": "Jewelry Trade Group Launches Silver Recycling Pilot Program",
+  "source_name": "JCK Online",
+  "published_at": "2026-05-20T10:00:00+00:00",
+  "entities": [
+    "recycling",
+    "jewelry"
+  ],
+  "content": "A regional jewelry trade association launched a pilot program encouraging member retailers to collect and recycle scrap silver from customers, aiming to divert more used silver back into the supply chain. The program covers a small number of stores and is not expected to have a measurable effect on total scrap supply.",
+  "expected": {
+    "decision": "new_event",
+    "matches_fixture": null,
+    "relevance": "low",
+    "importance": "low"
+  }
+}

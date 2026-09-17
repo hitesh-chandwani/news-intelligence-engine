@@ -1,0 +1,18 @@
+{
+  "id": "03-fed-pause-analyst-note",
+  "url": "https://example.com/eval/03-fed-pause-analyst-note",
+  "title": "Analysts Reiterate Bullish Silver Outlook After Fed Pause",
+  "source_name": "MarketWatch",
+  "published_at": "2026-07-03T11:00:00+00:00",
+  "entities": [
+    "Federal Reserve",
+    "Silver"
+  ],
+  "content": "In a note to clients, several bank commodity desks reiterated their bullish silver price targets following this week's Federal Reserve decision to hold rates steady. The note largely restates the macro case already made earlier in the week -- lower real yields, a softer dollar -- without introducing new data or price action.",
+  "expected": {
+    "decision": "existing_event",
+    "matches_fixture": "01-fed-pause-rate-hikes",
+    "relevance": "medium",
+    "importance": "low"
+  }
+}

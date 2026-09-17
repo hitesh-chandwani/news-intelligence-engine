@@ -1,0 +1,20 @@
+{
+  "id": "17-peru-protests-mine-blockade",
+  "url": "https://example.com/eval/17-peru-protests-mine-blockade",
+  "title": "Road Blockades in Southern Peru Cut Off Major Silver-Copper Mine",
+  "source_name": "Reuters",
+  "published_at": "2026-08-05T12:00:00+00:00",
+  "entities": [
+    "Peru",
+    "protests",
+    "mining",
+    "supply"
+  ],
+  "content": "Anti-government protests in southern Peru have escalated into road blockades that have cut off supply routes to one of the country's largest silver-copper mining complexes, forcing the operator to suspend concentrate shipments. Peru is the world's second-largest silver-producing country, and prolonged blockades in prior years have led to multi-week production halts. The government has not yet said how it plans to respond.",
+  "expected": {
+    "decision": "new_event",
+    "matches_fixture": null,
+    "relevance": "high",
+    "importance": "critical"
+  }
+}

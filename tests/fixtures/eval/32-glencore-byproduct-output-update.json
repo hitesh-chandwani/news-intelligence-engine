@@ -1,0 +1,19 @@
+{
+  "id": "32-glencore-byproduct-output-update",
+  "url": "https://example.com/eval/32-glencore-byproduct-output-update",
+  "title": "Glencore Reports Higher Silver By-Product Output From Zinc Operations",
+  "source_name": "Reuters",
+  "published_at": "2026-02-10T10:00:00+00:00",
+  "entities": [
+    "Glencore",
+    "by-product",
+    "zinc"
+  ],
+  "content": "Diversified miner Glencore reported higher silver by-product output from its zinc operations in its latest quarterly production report, attributing the increase to higher ore throughput rather than any change in silver-specific investment.",
+  "expected": {
+    "decision": "new_event",
+    "matches_fixture": null,
+    "relevance": "medium",
+    "importance": "medium"
+  }
+}

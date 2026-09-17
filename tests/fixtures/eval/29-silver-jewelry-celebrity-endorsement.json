@@ -1,0 +1,18 @@
+{
+  "id": "29-silver-jewelry-celebrity-endorsement",
+  "url": "https://example.com/eval/29-silver-jewelry-celebrity-endorsement",
+  "title": "Pop Star Launches Silver Jewelry Capsule Collection",
+  "source_name": "People",
+  "published_at": "2026-06-15T18:00:00+00:00",
+  "entities": [
+    "celebrity",
+    "jewelry"
+  ],
+  "content": "A pop star announced a limited-edition silver jewelry capsule collection in partnership with a mid-sized fashion brand, set to release next month. The collection is a marketing tie-in and is not expected to have any measurable effect on silver demand or prices.",
+  "expected": {
+    "decision": "new_event",
+    "matches_fixture": null,
+    "relevance": "irrelevant",
+    "importance": "low"
+  }
+}

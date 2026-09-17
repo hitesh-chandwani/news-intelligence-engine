@@ -1,0 +1,18 @@
+{
+  "id": "36-silver-unrelated-gold-etf-news",
+  "url": "https://example.com/eval/36-silver-unrelated-gold-etf-news",
+  "title": "Gold ETF Assets Hit New Record as Investors Pile Into Safe Havens",
+  "source_name": "Bloomberg",
+  "published_at": "2026-02-27T15:00:00+00:00",
+  "entities": [
+    "gold",
+    "ETF"
+  ],
+  "content": "Gold-backed exchange-traded funds saw assets under management hit a new record this week as investors sought safe-haven exposure amid broader market volatility. The article briefly notes that silver ETFs saw comparatively smaller inflows over the same period, without further detail.",
+  "expected": {
+    "decision": "new_event",
+    "matches_fixture": null,
+    "relevance": "irrelevant",
+    "importance": "low"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "id": "24-new-silver-etf-launch",
+  "url": "https://example.com/eval/24-new-silver-etf-launch",
+  "title": "Boutique Asset Manager Launches New Physical Silver ETF",
+  "source_name": "ETF.com",
+  "published_at": "2026-04-22T14:00:00+00:00",
+  "entities": [
+    "ETF",
+    "launch"
+  ],
+  "content": "A boutique asset manager launched a new physically-backed silver ETF on Thursday, entering a market already dominated by the iShares Silver Trust and Sprott's PSLV. The new fund raised a modest $12 million on its first trading day, a small fraction of the assets held by the established players.",
+  "expected": {
+    "decision": "new_event",
+    "matches_fixture": null,
+    "relevance": "medium",
+    "importance": "low"
+  }
+}

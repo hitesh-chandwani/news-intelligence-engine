@@ -1,0 +1,17 @@
+{
+  "id": "30-silver-spot-price-daily-move",
+  "url": "https://example.com/eval/30-silver-spot-price-daily-move",
+  "title": "Silver Ticks Up 0.3% in Quiet Trading",
+  "source_name": "Investing.com",
+  "published_at": "2026-07-09T21:00:00+00:00",
+  "entities": [
+    "price"
+  ],
+  "content": "Spot silver edged up 0.3% Thursday in otherwise quiet trading, with no notable news catalyst cited by desk commentary. Volumes were described as below average ahead of the weekend.",
+  "expected": {
+    "decision": "new_event",
+    "matches_fixture": null,
+    "relevance": "low",
+    "importance": "low"
+  }
+}

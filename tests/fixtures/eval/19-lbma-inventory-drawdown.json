@@ -1,0 +1,19 @@
+{
+  "id": "19-lbma-inventory-drawdown",
+  "url": "https://example.com/eval/19-lbma-inventory-drawdown",
+  "title": "LBMA Vault Silver Holdings Fall to Three-Year Low",
+  "source_name": "LBMA",
+  "published_at": "2026-08-25T09:00:00+00:00",
+  "entities": [
+    "LBMA",
+    "London",
+    "inventory"
+  ],
+  "content": "London Bullion Market Association vault data released Tuesday shows total silver holdings fell to their lowest level in three years, continuing a steady drawdown trend seen over the past several quarters as physical metal moves from London vaults into ETF and industrial supply chains.",
+  "expected": {
+    "decision": "new_event",
+    "matches_fixture": null,
+    "relevance": "medium",
+    "importance": "medium"
+  }
+}

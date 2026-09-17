@@ -1,0 +1,19 @@
+{
+  "id": "05-mexico-mine-strike-resolved",
+  "url": "https://example.com/eval/05-mexico-mine-strike-resolved",
+  "title": "Zacatecas Silver Mine Strike Ends After Wage Deal Reached",
+  "source_name": "Mining.com",
+  "published_at": "2026-06-24T08:00:00+00:00",
+  "entities": [
+    "Mexico",
+    "Fresnillo",
+    "mining strike"
+  ],
+  "content": "The two-week strike at the Zacatecas silver-lead mine has ended after the operator and union agreed to a wage increase, the company confirmed Tuesday. Production is expected to ramp back to full capacity within days. The operator estimated the stoppage cost roughly 400,000 ounces of forgone silver output, a modest dent in the mine's annual production.",
+  "expected": {
+    "decision": "existing_event",
+    "matches_fixture": "04-mexico-mine-strike-begins",
+    "relevance": "high",
+    "importance": "medium"
+  }
+}

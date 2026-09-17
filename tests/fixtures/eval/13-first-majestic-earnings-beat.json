@@ -1,0 +1,19 @@
+{
+  "id": "13-first-majestic-earnings-beat",
+  "url": "https://example.com/eval/13-first-majestic-earnings-beat",
+  "title": "First Majestic Silver Beats Quarterly Production Guidance",
+  "source_name": "Reuters",
+  "published_at": "2026-02-20T13:00:00+00:00",
+  "entities": [
+    "First Majestic Silver",
+    "earnings",
+    "mining"
+  ],
+  "content": "First Majestic Silver reported quarterly silver-equivalent production above the top end of its own guidance range, citing higher ore grades at its Mexican operations. The company also reported lower all-in sustaining costs than a year earlier, helped by the stronger production figures.",
+  "expected": {
+    "decision": "new_event",
+    "matches_fixture": null,
+    "relevance": "medium",
+    "importance": "medium"
+  }
+}

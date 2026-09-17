@@ -1,0 +1,18 @@
+{
+  "id": "20-comex-registered-stocks-decline",
+  "url": "https://example.com/eval/20-comex-registered-stocks-decline",
+  "title": "COMEX Registered Silver Stocks Dip Slightly on Light Deliveries",
+  "source_name": "CME Group",
+  "published_at": "2026-08-26T20:00:00+00:00",
+  "entities": [
+    "COMEX",
+    "inventory"
+  ],
+  "content": "COMEX registered silver stocks declined by about 0.4% in Tuesday's warehouse report, a routine move within the normal weekly range and not considered significant by most desk commentary.",
+  "expected": {
+    "decision": "new_event",
+    "matches_fixture": null,
+    "relevance": "low",
+    "importance": "low"
+  }
+}

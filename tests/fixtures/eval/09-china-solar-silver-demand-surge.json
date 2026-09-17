@@ -1,0 +1,20 @@
+{
+  "id": "09-china-solar-silver-demand-surge",
+  "url": "https://example.com/eval/09-china-solar-silver-demand-surge",
+  "title": "China's Solar Installations Drive Record Industrial Silver Demand",
+  "source_name": "Reuters",
+  "published_at": "2026-04-02T07:00:00+00:00",
+  "entities": [
+    "China",
+    "solar",
+    "photovoltaic",
+    "industrial demand"
+  ],
+  "content": "China installed a record 120 gigawatts of new solar capacity in the first quarter, according to the national energy administration, pushing industrial silver demand for photovoltaic paste to an all-time quarterly high. Industry group the Silver Institute said the pace of installation, if sustained, would push full-year solar-related silver demand above prior forecasts by roughly 8%.",
+  "expected": {
+    "decision": "new_event",
+    "matches_fixture": null,
+    "relevance": "high",
+    "importance": "high"
+  }
+}

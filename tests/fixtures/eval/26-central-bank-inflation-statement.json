@@ -1,0 +1,19 @@
+{
+  "id": "26-central-bank-inflation-statement",
+  "url": "https://example.com/eval/26-central-bank-inflation-statement",
+  "title": "European Central Bank Chief Warns Inflation Risks Remain Elevated",
+  "source_name": "Financial Times",
+  "published_at": "2026-07-18T09:00:00+00:00",
+  "entities": [
+    "European Central Bank",
+    "inflation",
+    "macro"
+  ],
+  "content": "The European Central Bank's president said in a speech Thursday that inflation risks remain elevated despite recent progress, pushing back against market expectations for near-term rate cuts. The comments lifted the euro and weighed modestly on precious metals priced in dollars, though silver's reaction was muted compared to prior ECB commentary.",
+  "expected": {
+    "decision": "new_event",
+    "matches_fixture": null,
+    "relevance": "high",
+    "importance": "high"
+  }
+}

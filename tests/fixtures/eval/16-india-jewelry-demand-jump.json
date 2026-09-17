@@ -1,0 +1,19 @@
+{
+  "id": "16-india-jewelry-demand-jump",
+  "url": "https://example.com/eval/16-india-jewelry-demand-jump",
+  "title": "Indian Silver Jewelry Demand Jumps After Import Duty Cut",
+  "source_name": "Economic Times",
+  "published_at": "2026-01-28T06:00:00+00:00",
+  "entities": [
+    "India",
+    "jewelry",
+    "demand"
+  ],
+  "content": "Silver jewelry retailers across India reported a noticeable pickup in demand following this month's import duty cut, with several large chains citing lower retail prices as the main driver ahead of the upcoming wedding season.",
+  "expected": {
+    "decision": "existing_event",
+    "matches_fixture": "15-india-silver-import-duty-cut",
+    "relevance": "medium",
+    "importance": "medium"
+  }
+}

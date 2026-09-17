@@ -1,0 +1,20 @@
+{
+  "id": "23-us-china-trade-tariffs-metals",
+  "url": "https://example.com/eval/23-us-china-trade-tariffs-metals",
+  "title": "US Announces New Tariffs on Metals Imports Amid China Trade Tension",
+  "source_name": "Reuters",
+  "published_at": "2026-09-01T16:00:00+00:00",
+  "entities": [
+    "United States",
+    "China",
+    "tariffs",
+    "geopolitical"
+  ],
+  "content": "The US administration announced a new round of tariffs targeting metals imports, part of an escalating trade dispute with China. While the tariffs primarily target base metals and steel, trade analysts said precious metals markets could see indirect effects through broader dollar and risk-sentiment moves if the dispute escalates further.",
+  "expected": {
+    "decision": "new_event",
+    "matches_fixture": null,
+    "relevance": "high",
+    "importance": "high"
+  }
+}

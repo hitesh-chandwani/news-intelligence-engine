@@ -1,0 +1,20 @@
+{
+  "id": "02-fed-pause-etf-inflow-followup",
+  "url": "https://example.com/eval/02-fed-pause-etf-inflow-followup",
+  "title": "Silver ETFs See Largest Single-Day Inflow in Six Months After Fed Decision",
+  "source_name": "Kitco News",
+  "published_at": "2026-07-02T09:00:00+00:00",
+  "entities": [
+    "iShares Silver Trust",
+    "SLV",
+    "Federal Reserve",
+    "Silver"
+  ],
+  "content": "Following Wednesday's Federal Reserve rate-pause announcement, the iShares Silver Trust (SLV) recorded its largest single-day inflow in six months, adding roughly 4.2 million ounces to its holdings. The move confirms the price rally seen immediately after the Fed decision was accompanied by real investment demand rather than purely short-term futures speculation. Sprott's PSLV trust also reported modest inflows over the same period.",
+  "expected": {
+    "decision": "existing_event",
+    "matches_fixture": "01-fed-pause-rate-hikes",
+    "relevance": "high",
+    "importance": "medium"
+  }
+}

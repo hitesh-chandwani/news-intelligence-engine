@@ -1,0 +1,19 @@
+{
+  "id": "06-mexico-mine-strike-output-impact",
+  "url": "https://example.com/eval/06-mexico-mine-strike-output-impact",
+  "title": "Analysts Size Up Lost Silver Output From Zacatecas Strike",
+  "source_name": "Reuters",
+  "published_at": "2026-06-26T08:00:00+00:00",
+  "entities": [
+    "Mexico",
+    "mining strike",
+    "supply"
+  ],
+  "content": "A follow-up research note from a commodities desk tallies the silver output lost during the recently resolved Zacatecas mine strike, estimating the impact at under 0.1% of global annual mine supply -- too small on its own to move prices materially, the note concludes, though it flags the episode as a reminder of Mexico's outsized role in global supply.",
+  "expected": {
+    "decision": "existing_event",
+    "matches_fixture": "04-mexico-mine-strike-begins",
+    "relevance": "medium",
+    "importance": "medium"
+  }
+}

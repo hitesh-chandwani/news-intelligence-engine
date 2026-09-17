@@ -1,0 +1,19 @@
+{
+  "id": "21-silver-battery-tech-breakthrough",
+  "url": "https://example.com/eval/21-silver-battery-tech-breakthrough",
+  "title": "Researchers Unveil Silver-Zinc Battery With Higher Energy Density",
+  "source_name": "TechCrunch",
+  "published_at": "2026-03-30T15:00:00+00:00",
+  "entities": [
+    "battery technology",
+    "industrial",
+    "research"
+  ],
+  "content": "A university research team published results on a new silver-zinc battery chemistry that achieves roughly 30% higher energy density than comparable lithium-ion cells in lab testing, though the team cautioned that silver's cost makes near-term commercial scaling unlikely outside of niche high-value applications like medical devices and aerospace.",
+  "expected": {
+    "decision": "new_event",
+    "matches_fixture": null,
+    "relevance": "medium",
+    "importance": "medium"
+  }
+}

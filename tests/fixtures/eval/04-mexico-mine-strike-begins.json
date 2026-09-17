@@ -1,0 +1,19 @@
+{
+  "id": "04-mexico-mine-strike-begins",
+  "url": "https://example.com/eval/04-mexico-mine-strike-begins",
+  "title": "Workers Strike at Major Mexican Silver-Lead Mine, Halting Output",
+  "source_name": "Mining.com",
+  "published_at": "2026-06-10T08:00:00+00:00",
+  "entities": [
+    "Mexico",
+    "Fresnillo",
+    "mining strike"
+  ],
+  "content": "Workers at a major silver-lead mine in Zacatecas state, Mexico, began an indefinite strike on Monday over wage disputes, halting production at a facility that accounts for roughly 3% of national silver output. The mine's operator said talks with the union have stalled and gave no timeline for a resolution. Mexico is the world's largest silver-producing country, and analysts flagged the stoppage as a potential near-term supply risk if it drags on.",
+  "expected": {
+    "decision": "new_event",
+    "matches_fixture": null,
+    "relevance": "high",
+    "importance": "high"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "id": "35-kghm-copper-mine-permit-delay",
+  "url": "https://example.com/eval/35-kghm-copper-mine-permit-delay",
+  "title": "KGHM Copper Mine Expansion Faces Permitting Delay in Poland",
+  "source_name": "Reuters",
+  "published_at": "2026-01-30T09:00:00+00:00",
+  "entities": [
+    "KGHM",
+    "Poland",
+    "permitting"
+  ],
+  "content": "Polish miner KGHM said a planned expansion of one of its copper operations, which also yields silver as a by-product, has been delayed by several months pending additional environmental permitting review. The company said existing production is unaffected.",
+  "expected": {
+    "decision": "new_event",
+    "matches_fixture": null,
+    "relevance": "medium",
+    "importance": "medium"
+  }
+}

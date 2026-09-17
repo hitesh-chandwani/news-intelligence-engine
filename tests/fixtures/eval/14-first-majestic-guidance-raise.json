@@ -1,0 +1,19 @@
+{
+  "id": "14-first-majestic-guidance-raise",
+  "url": "https://example.com/eval/14-first-majestic-guidance-raise",
+  "title": "First Majestic Raises Full-Year Production Guidance",
+  "source_name": "Reuters",
+  "published_at": "2026-02-21T13:00:00+00:00",
+  "entities": [
+    "First Majestic Silver",
+    "guidance",
+    "mining"
+  ],
+  "content": "A day after reporting a strong quarter, First Majestic Silver raised its full-year production guidance, citing the same higher-grade ore trend at its Mexican mines that drove last quarter's beat.",
+  "expected": {
+    "decision": "existing_event",
+    "matches_fixture": "13-first-majestic-earnings-beat",
+    "relevance": "medium",
+    "importance": "medium"
+  }
+}

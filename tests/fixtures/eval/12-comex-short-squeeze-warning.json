@@ -1,0 +1,19 @@
+{
+  "id": "12-comex-short-squeeze-warning",
+  "url": "https://example.com/eval/12-comex-short-squeeze-warning",
+  "title": "Silver Short Squeeze Risk Rises as Speculative Longs Hit Extreme",
+  "source_name": "Bloomberg",
+  "published_at": "2026-03-13T18:00:00+00:00",
+  "entities": [
+    "COMEX",
+    "short squeeze",
+    "futures positioning"
+  ],
+  "content": "A week after the CFTC reported the largest speculative net-long silver position in over a year, several trading desks warned that positioning has become stretched enough to raise the risk of a sharp, fast unwind -- or, alternatively, a retail-driven short squeeze reminiscent of prior episodes -- if a catalyst emerges. Options market volatility for silver has already begun to price in the elevated risk of a large near-term move.",
+  "expected": {
+    "decision": "existing_event",
+    "matches_fixture": "11-comex-speculative-long-positioning",
+    "relevance": "high",
+    "importance": "high"
+  }
+}

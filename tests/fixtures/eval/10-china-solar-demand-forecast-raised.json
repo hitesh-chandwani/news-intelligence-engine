@@ -1,0 +1,20 @@
+{
+  "id": "10-china-solar-demand-forecast-raised",
+  "url": "https://example.com/eval/10-china-solar-demand-forecast-raised",
+  "title": "Silver Institute Raises Full-Year Solar Demand Forecast",
+  "source_name": "Silver Institute",
+  "published_at": "2026-04-15T07:00:00+00:00",
+  "entities": [
+    "China",
+    "solar",
+    "Silver Institute",
+    "industrial demand"
+  ],
+  "content": "Citing the stronger-than-expected first-quarter installation pace in China, the Silver Institute formally raised its full-year forecast for photovoltaic-related silver demand, now projecting growth of roughly 9% year over year, up from an earlier 5% estimate.",
+  "expected": {
+    "decision": "existing_event",
+    "matches_fixture": "09-china-solar-silver-demand-surge",
+    "relevance": "high",
+    "importance": "medium"
+  }
+}

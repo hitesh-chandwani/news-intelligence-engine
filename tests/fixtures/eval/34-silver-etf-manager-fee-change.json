@@ -1,0 +1,18 @@
+{
+  "id": "34-silver-etf-manager-fee-change",
+  "url": "https://example.com/eval/34-silver-etf-manager-fee-change",
+  "title": "ETF Issuer Trims Expense Ratio on Silver Trust by Two Basis Points",
+  "source_name": "ETF.com",
+  "published_at": "2026-03-18T13:00:00+00:00",
+  "entities": [
+    "ETF",
+    "fees"
+  ],
+  "content": "An asset manager announced a two-basis-point reduction in the expense ratio of one of its silver-backed exchange-traded products, an administrative change that industry commentary described as unlikely to meaningfully affect flows.",
+  "expected": {
+    "decision": "new_event",
+    "matches_fixture": null,
+    "relevance": "irrelevant",
+    "importance": "low"
+  }
+}

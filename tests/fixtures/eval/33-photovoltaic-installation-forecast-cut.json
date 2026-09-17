@@ -1,0 +1,19 @@
+{
+  "id": "33-photovoltaic-installation-forecast-cut",
+  "url": "https://example.com/eval/33-photovoltaic-installation-forecast-cut",
+  "title": "Global Solar Installation Forecast Cut on Financing Headwinds",
+  "source_name": "PV Magazine",
+  "published_at": "2026-09-08T12:00:00+00:00",
+  "entities": [
+    "solar",
+    "forecast",
+    "industrial demand"
+  ],
+  "content": "A leading energy research firm cut its global solar installation forecast for the coming year, citing higher financing costs and permitting delays in several major markets. Because photovoltaic cells are a major and fast-growing source of industrial silver demand, the downward revision was flagged by commodity analysts as a modest headwind for the industrial-demand side of the silver market.",
+  "expected": {
+    "decision": "new_event",
+    "matches_fixture": null,
+    "relevance": "high",
+    "importance": "high"
+  }
+}

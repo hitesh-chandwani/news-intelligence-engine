@@ -1,0 +1,19 @@
+{
+  "id": "27-solar-manufacturer-capacity-expansion",
+  "url": "https://example.com/eval/27-solar-manufacturer-capacity-expansion",
+  "title": "Major Solar Panel Maker Announces New Gigafactory",
+  "source_name": "PV Magazine",
+  "published_at": "2026-05-28T11:00:00+00:00",
+  "entities": [
+    "solar",
+    "manufacturing",
+    "industrial demand"
+  ],
+  "content": "A leading solar panel manufacturer announced plans to build a new gigafactory-scale production facility, expected to add roughly 15% to the company's global cell-manufacturing capacity once fully operational in two years. Analysts noted the expansion would, over time, add incrementally to industrial silver paste demand.",
+  "expected": {
+    "decision": "new_event",
+    "matches_fixture": null,
+    "relevance": "medium",
+    "importance": "medium"
+  }
+}

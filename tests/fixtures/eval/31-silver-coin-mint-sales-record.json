@@ -1,0 +1,19 @@
+{
+  "id": "31-silver-coin-mint-sales-record",
+  "url": "https://example.com/eval/31-silver-coin-mint-sales-record",
+  "title": "US Mint Reports Record Monthly Silver Eagle Coin Sales",
+  "source_name": "Coin World",
+  "published_at": "2026-08-11T14:00:00+00:00",
+  "entities": [
+    "US Mint",
+    "coins",
+    "physical investment"
+  ],
+  "content": "The US Mint reported its highest monthly sales of American Silver Eagle bullion coins in over two years, a sign of continued strong retail investor appetite for physical silver even as ETF flows have been mixed in recent weeks.",
+  "expected": {
+    "decision": "new_event",
+    "matches_fixture": null,
+    "relevance": "medium",
+    "importance": "low"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "id": "28-global-supply-deficit-report",
+  "url": "https://example.com/eval/28-global-supply-deficit-report",
+  "title": "Silver Institute: Global Market to Post Fifth Straight Annual Deficit",
+  "source_name": "Silver Institute",
+  "published_at": "2026-04-25T08:00:00+00:00",
+  "entities": [
+    "Silver Institute",
+    "supply deficit",
+    "annual report"
+  ],
+  "content": "The Silver Institute's annual World Silver Survey projects the global silver market will post its fifth consecutive annual supply deficit this year, as industrial demand -- led by solar -- continues to outpace mine and recycled supply growth. The report is one of the industry's most closely watched annual data releases and is frequently cited across trading desks and by the financial press.",
+  "expected": {
+    "decision": "new_event",
+    "matches_fixture": null,
+    "relevance": "high",
+    "importance": "critical"
+  }
+}
