@@ -210,6 +210,17 @@ class Event(Base):
     query changes from "no existing outbound `event_relation` row" to
     `Event.related_at.is_(None)`, so an event is only ever sent to the
     LLM once, period, regardless of outcome.
+
+    ``relate_attempts`` is added by #55: `Integer`, `nullable=False`,
+    `server_default="0"`, incremented by `relate_stage` (#29) every time
+    it actually calls `client.call_structured` for the row, used to cap
+    retries of a genuine `json.JSONDecodeError`/`pydantic.ValidationError`
+    failure (`relate_attempts < max_relate_attempts` in the stage's
+    selection query) rather than retrying it forever -- the same
+    operational fix #45/#46 established for
+    `source.extract_attempts`/`event.score_attempts`, applied by symmetry
+    to `event`/relate. Distinct from `related_at` above: this column caps
+    retrying a *failure*, `related_at` caps retrying a *success*.
     """
 
     __tablename__ = "event"
@@ -250,6 +261,7 @@ class Event(Base):
     embedding: Mapped[list[float]] = mapped_column(Vector(384), nullable=False)
     score_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     related_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    relate_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     last_material_update_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

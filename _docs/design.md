@@ -150,6 +150,7 @@ even though the MVP seeds exactly one Watch. Timestamps are `timestamptz`.
 | embedding | `vector(384)` | for dedup / relatedness (FastEmbed bge-small-en-v1.5) |
 | score_attempts | integer, default `0` | incremented per `score_stage` call attempt; caps retry of `relevance IS NULL` rows at `MAX_SCORE_ATTEMPTS` |
 | related_at | timestamptz null | set once after a successful `relate_stage` pass for this event, regardless of outcome; never re-checked once set |
+| relate_attempts | integer, default `0` | incremented per `relate_stage` call attempt; caps retry at `MAX_RELATE_ATTEMPTS` |
 | last_material_update_at | timestamptz | bumped only on material change (FR-019) |
 | created_at, updated_at | timestamptz | |
 
@@ -430,6 +431,7 @@ uses `TrafilaturaExtractor` (local CPU, zero cost). A provider that already retu
 | `DEDUP_WINDOW_DAYS` | `14` | Candidate recall window |
 | `MAX_EXTRACT_ATTEMPTS` | `3` | Cap on `extract` stage retries per `source` row before it stops being retried |
 | `MAX_SCORE_ATTEMPTS` | `3` | Cap on `score` stage retries per `event` row before it stops being retried |
+| `MAX_RELATE_ATTEMPTS` | `3` | Cap on `relate` stage retries per `event` row before it stops being retried |
 
 ---
 

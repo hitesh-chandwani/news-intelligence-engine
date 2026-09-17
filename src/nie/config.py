@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     dedup_window_days: int = 14
     max_extract_attempts: int = 3
     max_score_attempts: int = 3
+    max_relate_attempts: int = 3
 
     # --- Variables with no design.md-listed default: optional until the
     # consuming module (see the issue's "Out of scope" list) ships ---
