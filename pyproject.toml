@@ -63,3 +63,13 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# `eval` (#41, `design.md` §16) is a manual, real-LLM-call harness against
+# tests/fixtures/eval/ -- excluded from the default run via this addopts
+# filter (it is still collected, just deselected before execution) so
+# `uv run pytest` on its own never attempts a network/LLM call, per
+# `_docs/testing-guidelines.md`. Run it explicitly with `-m eval`, which
+# overrides this default: `uv run pytest tests/test_eval_harness.py -m eval -s`.
+addopts = "-m 'not eval'"
+markers = [
+    "eval: manual eval harness against tests/fixtures/eval/ -- makes real LLM calls, excluded from the default run (see tests/test_eval_harness.py)",
+]
