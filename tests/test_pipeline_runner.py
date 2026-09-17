@@ -293,9 +293,10 @@ async def test_all_stages_running_end_to_end_produce_an_ok_run(
         assert run.finished_at >= run.started_at
         assert set(run.stats["discover"]) == {"discovered"}
         assert isinstance(run.stats["discover"]["discovered"], int)
-        assert set(run.stats["extract"]) == {"extracted", "extract_failed"}
+        assert set(run.stats["extract"]) == {"extracted", "extract_failed", "extract_capped"}
         assert isinstance(run.stats["extract"]["extracted"], int)
         assert isinstance(run.stats["extract"]["extract_failed"], int)
+        assert isinstance(run.stats["extract"]["extract_capped"], int)
         # embed_stage (#21) is now real too, same as discover/extract: its
         # global `status == "extracted" AND embedding IS NULL` selection
         # (no watch_id filter, by design) can pick up rows left behind by
