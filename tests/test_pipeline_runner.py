@@ -340,10 +340,11 @@ async def test_all_stages_running_end_to_end_produce_an_ok_run(
         # synthesize's above: its global `Event.relevance.is_(None)`
         # selection (no `watch_id` filter, by design) can pick up rows
         # left behind by other test files sharing this never-truncated DB.
-        assert set(run.stats["score"]) == {"irrelevant", "scored", "skipped"}
+        assert set(run.stats["score"]) == {"irrelevant", "scored", "skipped", "score_capped"}
         assert isinstance(run.stats["score"]["irrelevant"], int)
         assert isinstance(run.stats["score"]["scored"], int)
         assert isinstance(run.stats["score"]["skipped"], int)
+        assert isinstance(run.stats["score"]["score_capped"], int)
         # relate_stage (#29) is now real too, same shape-only treatment as
         # score's above: its global selection (`Event.relevance.isnot(None)`
         # AND no existing outbound `event_relation` row, no `watch_id`

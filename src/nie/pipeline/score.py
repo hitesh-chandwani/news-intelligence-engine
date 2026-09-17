@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nie.config import Settings
 from nie.llm.client import LLMClient
 from nie.models import (
     Category,
@@ -290,18 +291,28 @@ async def score_stage(session: AsyncSession, *, client: LLMClient | None = None)
     `impact_direction`, `impact_reason`, `impact_confidence`.
 
     `client` defaults to constructing its own `LLMClient()` when not given,
-    same as `adjudicate_stage`/`synthesize_stage`.
+    same as `adjudicate_stage`/`synthesize_stage`. Reads `Settings().
+    max_score_attempts` fresh on every call, same "construct `Settings()`
+    inside the stage" pattern `extract_stage`/`discover_stage` use.
 
-    Selects rows via `select(Event).where(Event.relevance.is_(None))` and
-    processes them sequentially (no concurrency), same style as
-    `adjudicate_stage`/`synthesize_stage`. `relevance` is the one field of
-    the five this stage always sets regardless of verdict -- including
-    `irrelevant` -- so "has this event been scored yet" is exactly
-    `relevance IS NULL`.
+    Selects rows via
+    `select(Event).where(Event.relevance.is_(None), Event.score_attempts <
+    settings.max_score_attempts)` and processes them sequentially (no
+    concurrency), same style as `adjudicate_stage`/`synthesize_stage`.
+    `relevance` is the one field of the five this stage always sets
+    regardless of verdict -- including `irrelevant` -- so "has this event
+    been scored yet" is exactly `relevance IS NULL`. An event already at
+    `score_attempts >= max_score_attempts` is excluded by this clause
+    entirely (#46): it's never loaded, never passed to `call_structured`,
+    and its `score_attempts` is left unchanged.
 
-    For each row: loads its `Watch` (`Event.watch_id`), calls
+    For each selected row: loads its `Watch` (`Event.watch_id`), calls
     `build_context_bundle(session, watch, event)` (#27), builds `messages`
-    from `score.md` (event + full bundle), and calls
+    from `score.md` (event + full bundle), increments `event.score_attempts`
+    by 1 (mirroring `extract_stage`'s `source.extract_attempts += 1`
+    placement -- before the call that might fail; unlike extract, score
+    has no "content already supplied" skip case, so every selected row
+    gets exactly one increment per call), and calls
     `client.call_structured(messages, ScoreResult)`.
 
     On a successful response, writes all five fields onto the `Event` row
@@ -313,24 +324,42 @@ async def score_stage(session: AsyncSession, *, client: LLMClient | None = None)
 
     A `json.JSONDecodeError`/`pydantic.ValidationError` still raised after
     `call_structured`'s own internal validate-then-retry-once is a per-row
-    failure: the event row is left completely unmodified (all five fields
-    stay `NULL`) and counted under `"skipped"`; the loop continues to the
-    next event. Any other exception propagates out of `score_stage`
-    uncaught, same precedent as `adjudicate_stage`/`synthesize_stage`.
+    failure: the event row is left with its five score fields unmodified
+    (all stay `NULL`, `score_attempts` already incremented above) and
+    counted under `"skipped"`; the loop continues to the next event. Any
+    other exception propagates out of `score_stage` uncaught, same
+    precedent as `adjudicate_stage`/`synthesize_stage`.
 
     Does not call `session.commit()` -- the runner (#18) commits after the
     stage returns.
 
-    Returns `{"irrelevant": N, "scored": M, "skipped": S}` --
-    `irrelevant` counts `relevance == "irrelevant"` responses, `scored`
-    counts every other successfully-persisted `relevance` value combined
-    (`low`/`medium`/`high`).
+    Returns `{"irrelevant": N, "scored": M, "skipped": S, "score_capped":
+    K}` -- `irrelevant` counts `relevance == "irrelevant"` responses,
+    `scored` counts every other successfully-persisted `relevance` value
+    combined (`low`/`medium`/`high`), `skipped` counts validation failures
+    this call, and `score_capped` counts `relevance IS NULL` rows excluded
+    by the cap this call (a separate count query -- `Event.relevance.
+    is_(None), Event.score_attempts >= settings.max_score_attempts` --
+    not folded into the main loop, same pattern `extract_stage` uses for
+    `extract_capped`).
     """
     if client is None:
         client = LLMClient()
+    settings = Settings()
 
-    result = await session.execute(select(Event).where(Event.relevance.is_(None)))
+    result = await session.execute(
+        select(Event).where(
+            Event.relevance.is_(None), Event.score_attempts < settings.max_score_attempts
+        )
+    )
     events = result.scalars().all()
+
+    capped_result = await session.execute(
+        select(Event.id).where(
+            Event.relevance.is_(None), Event.score_attempts >= settings.max_score_attempts
+        )
+    )
+    score_capped_count = len(capped_result.scalars().all())
 
     irrelevant_count = 0
     scored_count = 0
@@ -343,6 +372,7 @@ async def score_stage(session: AsyncSession, *, client: LLMClient | None = None)
         bundle = await build_context_bundle(session, watch, event)
         messages = _build_messages(event, bundle)
 
+        event.score_attempts += 1
         try:
             score = await client.call_structured(messages, ScoreResult)
         except (json.JSONDecodeError, ValidationError):
@@ -366,4 +396,5 @@ async def score_stage(session: AsyncSession, *, client: LLMClient | None = None)
         "irrelevant": irrelevant_count,
         "scored": scored_count,
         "skipped": skipped_count,
+        "score_capped": score_capped_count,
     }
