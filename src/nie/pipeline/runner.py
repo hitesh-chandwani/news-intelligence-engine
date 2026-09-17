@@ -20,6 +20,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nie.db import async_session_factory
@@ -98,7 +99,18 @@ async def run_pipeline(
 
     Once every stage has run, `finished_at` and a terminal status ("ok"
     if nothing raised, "failed" if every stage raised, "partial"
-    otherwise) are set and committed.
+    otherwise) are written via a single conditional
+    `UPDATE ... WHERE id = :id AND status = 'running'` (#53) rather than
+    a plain unconditional `UPDATE` -- if a separate `POST /pipeline/runs/
+    {run_id}/cancel` call (`src/nie/web/routers/pipeline.py`) has already
+    moved this row to `"cancelled"` while this coroutine was still inside
+    the stage loop above (e.g. a hung stage past any client-side
+    timeout), the `WHERE status = 'running'` guard matches zero rows, this
+    closing write becomes a no-op, and the row is left `"cancelled"`
+    rather than being silently clobbered back to `"ok"`/`"partial"`/
+    `"failed"`. `run_pipeline` does not re-check or raise in that case --
+    it simply returns `run_id` as normal, since from its own point of
+    view it still completed the run it was asked to run.
 
     `stats` is reassigned (`{**old, stage_name: value}`) rather than
     mutated in place -- `PipelineRun.stats` is a plain `dict` column, not
@@ -132,8 +144,11 @@ async def run_pipeline(
         else:
             status = "partial"
 
-        run.finished_at = datetime.now(UTC)
-        run.status = status
+        await session.execute(
+            update(PipelineRun)
+            .where(PipelineRun.id == run_id, PipelineRun.status == "running")
+            .values(finished_at=datetime.now(UTC), status=status)
+        )
         await session.commit()
 
     return run_id
