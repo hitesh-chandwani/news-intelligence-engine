@@ -279,6 +279,29 @@ class NotificationResponse(BaseModel):
     read_at: datetime | None
 
 
+class FeedbackResponse(BaseModel):
+    """Response body for `POST /events/{id}/feedback` (issue #39). Mirrors
+    every column of a `nie.models.Feedback` row, including `watch_id`
+    (same "echo it back" precedent `NotificationResponse` set) -- this
+    endpoint's lookup is by `event_id` in the URL, not scoped to the
+    Silver watch, same as `EventDetail`. `note` is always `None` in
+    practice (this task's UI has no free-text field, see the issue's Out
+    of scope), but the column exists on the row so it's mirrored here too,
+    same as every other `*Response` schema in this module mirroring every
+    column rather than a hand-picked subset. `verdict` is narrowed to the
+    exact 5 string values `nie.models.Feedback`'s `CheckConstraint`
+    allows, same "plain `text` column, `Literal` on the wire" pattern used
+    throughout this module.
+    """
+
+    id: uuid.UUID
+    watch_id: uuid.UUID
+    event_id: uuid.UUID
+    verdict: Literal["useful", "not_useful", "too_many_similar", "more_like_this", "less_of_this"]
+    note: str | None
+    created_at: datetime
+
+
 class EventDetail(BaseModel):
     """Full response body for `GET /events/{id}` (issue #37): every column
     of a `nie.models.Event` row (`fact_summary`/`interpretation` kept as
