@@ -28,7 +28,7 @@ import pytest
 from alembic.command import upgrade
 from alembic.config import Config
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nie.db import create_engine, create_session_factory
@@ -341,6 +341,18 @@ async def test_get_event_detail_round_trips_fact_and_interpretation_sources_cate
     """`GET /events/{id}` on a created event round-trips `fact_summary`/
     `interpretation` as distinct fields, and includes its linked source
     (with `url`) and linked category.
+
+    Cleans up the `Source`/`EventSource` rows it creates at the end (the
+    only test in this module that creates a `Source` under the *real*
+    Silver watch): `tests/test_pipeline_discover.py`'s
+    `_delete_silver_watch_and_dependents` bulk-`DELETE`s every `source`
+    row for the Silver watch assuming no FK dependents on it -- leaving
+    an `event_source` row referencing a `source` this test created would
+    break that unrelated, already-passing test the next time it runs
+    (Postgres enforces the FK at `DELETE` time). Every other test in this
+    module only touches `event`/`event_category`/`event_relation`, which
+    that cleanup helper never deletes from, so no such conflict exists
+    for them.
     """
     slug = CATEGORIES[1][0]
     async with session_factory() as session:
@@ -360,15 +372,22 @@ async def test_get_event_detail_round_trips_fact_and_interpretation_sources_cate
         session.add(EventSource(event_id=event.id, source_id=source.id))
         await session.commit()
         event_id = event.id
+        source_id = source.id
 
-    response = await seeded_client.get(f"/events/{event_id}")
-    assert response.status_code == 200
-    body = response.json()
-    assert _is_event_detail_shaped(body)
-    assert body["fact_summary"] == "Observed fact only."
-    assert body["interpretation"] == "System interpretation only."
-    assert slug in body["categories"]
-    assert any(s["url"] == source_url for s in body["sources"])
+    try:
+        response = await seeded_client.get(f"/events/{event_id}")
+        assert response.status_code == 200
+        body = response.json()
+        assert _is_event_detail_shaped(body)
+        assert body["fact_summary"] == "Observed fact only."
+        assert body["interpretation"] == "System interpretation only."
+        assert slug in body["categories"]
+        assert any(s["url"] == source_url for s in body["sources"])
+    finally:
+        async with session_factory() as session:
+            await session.execute(delete(EventSource).where(EventSource.event_id == event_id))
+            await session.execute(delete(Source).where(Source.id == source_id))
+            await session.commit()
 
 
 async def test_get_event_detail_related_events_both_directions(

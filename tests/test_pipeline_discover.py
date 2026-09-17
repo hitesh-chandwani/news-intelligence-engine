@@ -39,7 +39,16 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nie.db import create_engine, create_session_factory
-from nie.models import ContextItem, NotificationPreference, Source, Watch
+from nie.models import (
+    ContextItem,
+    Event,
+    EventCategory,
+    EventRelation,
+    EventSource,
+    NotificationPreference,
+    Source,
+    Watch,
+)
 from nie.pipeline.discover import discover_stage
 from nie.seed.run import SILVER_WATCH_SLUG, seed
 
@@ -114,10 +123,34 @@ async def _delete_silver_watch_and_dependents(session: AsyncSession) -> None:
     never truncated between test runs (see module docstring), so a test
     that needs "no watch exists" has to establish that state itself
     rather than assume it.
+
+    `Event`/`EventCategory`/`EventSource`/`EventRelation` rows are deleted
+    here (in FK-safe order, before `Source`/`Watch`) since issue #37's
+    `tests/test_web_events.py` -- unlike every test module before it --
+    deliberately leaves most `Event` rows it creates in place against the
+    *real* Silver watch (this shared DB is never truncated, and an event
+    row has no problem persisting on its own); without this, `DELETE FROM
+    watch` below fails its `event.watch_id` FK check forever once any such
+    row exists.
     """
     watch_id = await _get_silver_watch_id(session)
     if watch_id is None:
         return
+    event_ids = list(
+        (await session.execute(select(Event.id).where(Event.watch_id == watch_id)))
+        .scalars()
+        .all()
+    )
+    if event_ids:
+        await session.execute(
+            delete(EventRelation).where(
+                EventRelation.from_event_id.in_(event_ids)
+                | EventRelation.to_event_id.in_(event_ids)
+            )
+        )
+        await session.execute(delete(EventCategory).where(EventCategory.event_id.in_(event_ids)))
+        await session.execute(delete(EventSource).where(EventSource.event_id.in_(event_ids)))
+        await session.execute(delete(Event).where(Event.id.in_(event_ids)))
     await session.execute(delete(Source).where(Source.watch_id == watch_id))
     await session.execute(delete(ContextItem).where(ContextItem.watch_id == watch_id))
     await session.execute(
