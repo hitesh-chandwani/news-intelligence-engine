@@ -198,6 +198,18 @@ class Event(Base):
     `source.extract_attempts`, applied by symmetry to `event`/score. No
     new terminal state / column -- `event` has no `status` column at all,
     unlike `source`, so a capped-out row simply stays `relevance IS NULL`.
+
+    ``related_at`` is added by #47: `DateTime(timezone=True)`, nullable,
+    no default -- a completion marker set once `relate_stage` (#29) has
+    successfully produced a parsed `RelationSet` response for the row,
+    regardless of how many relations survived filtering (including zero),
+    mirroring `Source.extracted_at`'s "set once on a successful pass,
+    never re-checked" semantics rather than `score_attempts`'s
+    retry-cap-counter shape -- a zero-relation `RelationSet` is a success,
+    not a failure, so there is nothing to cap. `relate_stage`'s selection
+    query changes from "no existing outbound `event_relation` row" to
+    `Event.related_at.is_(None)`, so an event is only ever sent to the
+    LLM once, period, regardless of outcome.
     """
 
     __tablename__ = "event"
@@ -237,6 +249,7 @@ class Event(Base):
     entities: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     embedding: Mapped[list[float]] = mapped_column(Vector(384), nullable=False)
     score_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    related_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_material_update_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
