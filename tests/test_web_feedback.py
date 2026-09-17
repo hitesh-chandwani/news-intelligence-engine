@@ -1,5 +1,6 @@
-"""Tests for POST /events/{id}/feedback in src/nie/web/routers/events.py
-(issue #39).
+"""Tests for POST /events/{id}/feedback and
+DELETE /events/{id}/feedback/{feedback_id} in
+src/nie/web/routers/events.py (issues #39, #51).
 
 Follows the exact `migrated_db`/`session_factory`/`silver_watch_id`/
 `seeded_client` fixture pattern `tests/test_web_events.py` (#37)/
@@ -35,7 +36,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nie.db import create_engine, create_session_factory
-from nie.models import Event, Feedback, Notification, Watch
+from nie.models import Category, Event, EventCategory, Feedback, Notification, Watch
+from nie.pipeline.score import build_context_bundle
+from nie.seed.categories import seed_categories
 from nie.seed.run import SILVER_WATCH_SLUG, seed
 from nie.web.app import create_app
 from nie.web.deps import get_session
@@ -370,3 +373,273 @@ async def test_plain_request_gets_json(
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/json")
     assert _is_feedback_response_shaped(response.json())
+
+
+# ---------------------------------------------------------------------------
+# DELETE /events/{event_id}/feedback/{feedback_id} -- withdraw (#51)
+# ---------------------------------------------------------------------------
+
+
+async def test_undo_control_shown_and_undo_clears_event_detail_confirmation(
+    session_factory: async_sessionmaker[AsyncSession],
+    silver_watch_id: uuid.UUID,
+    seeded_client: AsyncClient,
+) -> None:
+    """Submitting feedback from the event detail page shows an "Undo"
+    control (`hx-delete` pointed at the just-created row's id) alongside
+    the confirmation; clicking it (a `DELETE` with `HX-Request: true`,
+    `HX-Target: event-detail`) re-renders `partials/event_detail.html`
+    back to its plain, no-confirmation state, and the row is gone from
+    the `feedback` table.
+    """
+    event_id = await _seed_event(
+        session_factory, silver_watch_id, title=_unique_title("Undo event detail")
+    )
+
+    submit_response = await seeded_client.post(
+        f"/events/{event_id}/feedback?verdict=useful",
+        headers={"HX-Request": "true", "HX-Target": "event-detail"},
+    )
+    assert submit_response.status_code == 200
+    assert "Feedback recorded: useful" in submit_response.text
+    assert "Undo" in submit_response.text
+
+    async with session_factory() as session:
+        result = await session.execute(select(Feedback).where(Feedback.event_id == event_id))
+        feedback = result.scalar_one()
+
+    assert f"/events/{event_id}/feedback/{feedback.id}" in submit_response.text
+
+    undo_response = await seeded_client.delete(
+        f"/events/{event_id}/feedback/{feedback.id}",
+        headers={"HX-Request": "true", "HX-Target": "event-detail"},
+    )
+    assert undo_response.status_code == 200
+    assert undo_response.headers["content-type"].startswith("text/html")
+    assert '<div id="event-detail">' in undo_response.text
+    assert "feedback-confirmation" not in undo_response.text
+    assert "Feedback recorded" not in undo_response.text
+
+    async with session_factory() as session:
+        result = await session.execute(select(Feedback).where(Feedback.id == feedback.id))
+        assert result.scalar_one_or_none() is None
+
+
+async def test_undo_control_shown_and_undo_clears_notification_list_confirmation(
+    session_factory: async_sessionmaker[AsyncSession],
+    silver_watch_id: uuid.UUID,
+    seeded_client: AsyncClient,
+) -> None:
+    """Same "Undo" affordance from the notification inbox
+    (`HX-Target: notification-list`): clicking it re-renders
+    `partials/notification_list.html` with that notification's
+    confirmation cleared, and the row is gone from the `feedback` table.
+    """
+    title = _unique_title("Undo notification list")
+    async with session_factory() as session:
+        event = await _make_event(session, silver_watch_id, title=title)
+        notification = Notification(
+            watch_id=silver_watch_id,
+            event_id=event.id,
+            reason="new-event",
+            payload={"title": title, "fact_summary": "x", "interpretation": "y"},
+            channels_sent=["inapp"],
+        )
+        session.add(notification)
+        await session.commit()
+        event_id = event.id
+
+    submit_response = await seeded_client.post(
+        f"/events/{event_id}/feedback?verdict=not_useful",
+        headers={"HX-Request": "true", "HX-Target": "notification-list"},
+    )
+    assert submit_response.status_code == 200
+    assert "Feedback recorded: not_useful" in submit_response.text
+    assert "Undo" in submit_response.text
+
+    async with session_factory() as session:
+        result = await session.execute(select(Feedback).where(Feedback.event_id == event_id))
+        feedback = result.scalar_one()
+
+    assert f"/events/{event_id}/feedback/{feedback.id}" in submit_response.text
+
+    undo_response = await seeded_client.delete(
+        f"/events/{event_id}/feedback/{feedback.id}",
+        headers={"HX-Request": "true", "HX-Target": "notification-list"},
+    )
+    assert undo_response.status_code == 200
+    assert undo_response.headers["content-type"].startswith("text/html")
+    assert '<div id="notification-list">' in undo_response.text
+    assert "feedback-confirmation" not in undo_response.text
+    assert "Feedback recorded" not in undo_response.text
+
+    async with session_factory() as session:
+        result = await session.execute(select(Feedback).where(Feedback.id == feedback.id))
+        assert result.scalar_one_or_none() is None
+
+
+async def test_withdraw_nonexistent_feedback_id_returns_404(
+    session_factory: async_sessionmaker[AsyncSession],
+    silver_watch_id: uuid.UUID,
+    seeded_client: AsyncClient,
+) -> None:
+    """`DELETE` against a `feedback_id` that doesn't exist at all returns
+    `404` with a JSON `{"detail": ...}` body, not a `500`.
+    """
+    event_id = await _seed_event(
+        session_factory, silver_watch_id, title=_unique_title("Withdraw nonexistent")
+    )
+
+    response = await seeded_client.delete(f"/events/{event_id}/feedback/{uuid.uuid4()}")
+    assert response.status_code == 404
+    assert "detail" in response.json()
+
+
+async def test_withdraw_mismatched_event_id_returns_404(
+    session_factory: async_sessionmaker[AsyncSession],
+    silver_watch_id: uuid.UUID,
+    seeded_client: AsyncClient,
+) -> None:
+    """A `feedback_id` that exists but belongs to a different `event_id`
+    than the one in the path returns `404`, same as a nonexistent id --
+    and the row is left untouched.
+    """
+    event_a_id = await _seed_event(
+        session_factory, silver_watch_id, title=_unique_title("Withdraw mismatch A")
+    )
+    event_b_id = await _seed_event(
+        session_factory, silver_watch_id, title=_unique_title("Withdraw mismatch B")
+    )
+
+    submit_response = await seeded_client.post(f"/events/{event_a_id}/feedback?verdict=useful")
+    assert submit_response.status_code == 200
+    feedback_id = uuid.UUID(submit_response.json()["id"])
+
+    response = await seeded_client.delete(f"/events/{event_b_id}/feedback/{feedback_id}")
+    assert response.status_code == 404
+    assert "detail" in response.json()
+
+    async with session_factory() as session:
+        result = await session.execute(select(Feedback).where(Feedback.id == feedback_id))
+        assert result.scalar_one_or_none() is not None
+
+
+async def test_withdraw_plain_request_returns_204_empty_body(
+    session_factory: async_sessionmaker[AsyncSession],
+    silver_watch_id: uuid.UUID,
+    seeded_client: AsyncClient,
+) -> None:
+    """Called directly with no `HX-Request` header on a valid, matching
+    `event_id`/`feedback_id`, the endpoint returns `204 No Content` with
+    an empty body -- same convention `DELETE /context/{item_id}` (#35)
+    already uses -- and the row is actually gone from the `feedback`
+    table (hard delete, not a soft delete/flag).
+    """
+    event_id = await _seed_event(
+        session_factory, silver_watch_id, title=_unique_title("Withdraw plain 204")
+    )
+    submit_response = await seeded_client.post(f"/events/{event_id}/feedback?verdict=useful")
+    feedback_id = uuid.UUID(submit_response.json()["id"])
+
+    response = await seeded_client.delete(f"/events/{event_id}/feedback/{feedback_id}")
+    assert response.status_code == 204
+    assert response.content == b""
+
+    async with session_factory() as session:
+        result = await session.execute(select(Feedback).where(Feedback.id == feedback_id))
+        assert result.scalar_one_or_none() is None
+
+
+async def test_double_delete_returns_404_not_silent_success(
+    session_factory: async_sessionmaker[AsyncSession],
+    silver_watch_id: uuid.UUID,
+    seeded_client: AsyncClient,
+) -> None:
+    """Withdrawing an already-withdrawn row (double-`DELETE`, or a
+    double-click on Undo) returns the same `404` as any other
+    nonexistent `feedback_id` -- not a `500`, and not a silent no-op
+    success.
+    """
+    event_id = await _seed_event(
+        session_factory, silver_watch_id, title=_unique_title("Double delete")
+    )
+    submit_response = await seeded_client.post(f"/events/{event_id}/feedback?verdict=useful")
+    feedback_id = uuid.UUID(submit_response.json()["id"])
+
+    first = await seeded_client.delete(f"/events/{event_id}/feedback/{feedback_id}")
+    assert first.status_code == 204
+
+    second = await seeded_client.delete(f"/events/{event_id}/feedback/{feedback_id}")
+    assert second.status_code == 404
+    assert "detail" in second.json()
+
+
+async def test_withdrawn_feedback_not_counted_by_feedback_bucket(
+    session_factory: async_sessionmaker[AsyncSession],
+    silver_watch_id: uuid.UUID,
+    seeded_client: AsyncClient,
+) -> None:
+    """Regression coverage for `FeedbackBucket`
+    (`src/nie/pipeline/score.py`, #27/#28): withdrawing a `feedback` row
+    via `DELETE` is a hard delete, so a subsequent scoring run's rolling
+    feedback summary (`build_context_bundle`) no longer counts it --
+    `FeedbackBucket` counts *all* rows in its window (no code change
+    needed there, it queries live table state), so this only holds if
+    the row is truly gone, not soft-deleted/flagged.
+    """
+    async with session_factory() as session:
+        await seed_categories(session)
+        category_result = await session.execute(
+            select(Category).where(Category.slug == "market")
+        )
+        category = category_result.scalar_one()
+        watch = await session.get(Watch, silver_watch_id)
+        assert watch is not None
+
+        event = await _make_event(
+            session, silver_watch_id, title=_unique_title("Withdrawn bucket regression")
+        )
+        session.add(EventCategory(event_id=event.id, category_id=category.id))
+        await session.commit()
+        event_id = event.id
+
+    submit_response = await seeded_client.post(f"/events/{event_id}/feedback?verdict=useful")
+    assert submit_response.status_code == 200
+    feedback_id = uuid.UUID(submit_response.json()["id"])
+
+    async with session_factory() as session:
+        before_watch = await session.get(Watch, silver_watch_id)
+        assert before_watch is not None
+        before_event = await session.get(Event, event_id)
+        assert before_event is not None
+        bundle_before = await build_context_bundle(session, before_watch, before_event)
+
+    before_count = next(
+        (
+            bucket.count
+            for bucket in bundle_before.feedback_summary
+            if bucket.category_slug == "market" and bucket.verdict == "useful"
+        ),
+        0,
+    )
+    assert before_count >= 1
+
+    delete_response = await seeded_client.delete(f"/events/{event_id}/feedback/{feedback_id}")
+    assert delete_response.status_code == 204
+
+    async with session_factory() as session:
+        after_watch = await session.get(Watch, silver_watch_id)
+        assert after_watch is not None
+        after_event = await session.get(Event, event_id)
+        assert after_event is not None
+        bundle_after = await build_context_bundle(session, after_watch, after_event)
+
+    after_count = next(
+        (
+            bucket.count
+            for bucket in bundle_after.feedback_summary
+            if bucket.category_slug == "market" and bucket.verdict == "useful"
+        ),
+        0,
+    )
+    assert after_count == before_count - 1
