@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard — News Intelligence Engine{% endblock %}
+
+{% block content %}
+  <h1>Dashboard</h1>
+
+  <section>
+    <h2>Watch status</h2>
+    {% include "partials/watch_status.html" %}
+  </section>
+
+  <section>
+    <h2>Last pipeline run</h2>
+    {% if last_run %}
+    <p>
+      Trigger: <strong>{{ last_run.trigger }}</strong>
+      &mdash;
+      Status: <strong>{{ last_run.status }}</strong>
+      &mdash;
+      Started: {{ last_run.started_at }}
+      &mdash;
+      Finished: {% if last_run.finished_at %}{{ last_run.finished_at }}{% else %}in progress{% endif %}
+    </p>
+    {% else %}
+    <p>No pipeline run yet.</p>
+    {% endif %}
+  </section>
+
+  <section>
+    <h2>Recent events</h2>
+    {% if events %}
+    <ul>
+      {% for event in events %}
+      <li>
+        <a href="/events/{{ event.id }}">{{ event.title }}</a>
+        &mdash;
+        {% if event.event_date %}{{ event.event_date }}{% else %}Date unknown{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p>No events yet.</p>
+    {% endif %}
+    <p><a href="/events">View all events</a></p>
+  </section>
+
+  <section>
+    <h2>Notifications</h2>
+    <p>Unread: <strong>{{ unread_count }}</strong></p>
+    <p><a href="/notifications">View notifications</a></p>
+  </section>
+
+  <nav>
+    <ul>
+      <li><a href="/events">Events</a></li>
+      <li><a href="/notifications">Notifications</a></li>
+      <li><a href="/context">Context</a></li>
+      <li><a href="/preferences">Preferences</a></li>
+    </ul>
+  </nav>
+{% endblock %}
