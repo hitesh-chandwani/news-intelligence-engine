@@ -393,6 +393,7 @@ uses `TrafilaturaExtractor` (local CPU, zero cost). A provider that already retu
 | `GET /preferences` / `PATCH /preferences` | Importance threshold + categories | FR-023, FR-024 |
 | `POST /pipeline/run` | Trigger a run now | — |
 | `GET /pipeline/runs` | Run history + stats | — |
+| `POST /pipeline/runs/{run_id}/cancel` | Cancel a running run + release the pipeline lock | — |
 
 ## 13. UI pages (Jinja + HTMX)
 

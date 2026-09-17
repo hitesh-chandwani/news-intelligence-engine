@@ -15,16 +15,30 @@ pipeline_lock`, the single process-local `asyncio.Lock` `create_app()`
 `create_scheduler()` -- see that module's docstrings for the full
 reasoning (a process-local lock over APScheduler's own `max_instances`,
 which is enforced per job id, not globally).
+
+`POST /pipeline/runs/{run_id}/cancel` (#53) is the third endpoint. There
+is no task queue and no task handle for a `run_pipeline()` call in
+flight inside another request/scheduler tick -- it cannot be
+interrupted -- so "cancel" here can only ever mark the DB row
+`"cancelled"` and forcibly release `pipeline_lock`; the original
+coroutine, if any, keeps running orphaned until it finishes on its own
+or the process restarts (#54 tracks real interruption via background
+execution). Both the row write here and `run_pipeline`'s own closing
+write are atomic conditional `UPDATE ... WHERE status = 'running'`
+statements (see each one's docstring) specifically so those two
+competing writers can never clobber each other.
 """
 
 from __future__ import annotations
 
 import asyncio
+import uuid
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nie.models import PipelineRun
@@ -51,6 +65,11 @@ MANUAL_TRIGGER = "manual"
 # -- no cursor/offset pagination, same precedent `events.py`'s
 # `_MAX_EVENTS` set for `GET /events` (#37).
 _MAX_RUNS = 100
+
+# `error` value `POST /pipeline/runs/{run_id}/cancel` writes on a
+# successful cancel (#53) -- distinguishes an operator cancel from a
+# stage-raised `error` string in the `pipeline_run.error` column.
+CANCELLED_ERROR = "cancelled by operator"
 
 
 def _to_summary(run: PipelineRun) -> PipelineRunSummary:
@@ -103,6 +122,75 @@ async def trigger_pipeline_run(request: Request, session: SessionDep) -> JSONRes
     result = await session.execute(select(PipelineRun).where(PipelineRun.id == run_id))
     run = result.scalar_one()
     return JSONResponse(content=_to_summary(run).model_dump(mode="json"))
+
+
+@router.post("/pipeline/runs/{run_id}/cancel")
+async def cancel_pipeline_run(
+    request: Request, run_id: uuid.UUID, session: SessionDep
+) -> JSONResponse:
+    """Mark a `status="running"` `pipeline_run` row `"cancelled"` and
+    forcibly release `app.state.pipeline_lock` (#53).
+
+    Cannot interrupt an in-flight `run_pipeline()` coroutine -- there is
+    no task handle to cancel under this synchronous, no-task-queue MVP
+    architecture (#54 is the prerequisite for real interruption). What
+    this *can* do, and does: atomically flip the DB row to `"cancelled"`
+    (`finished_at` set, `error` set to `CANCELLED_ERROR`) so it reads as
+    cancelled everywhere else in the app, and force-release
+    `pipeline_lock` so a stuck run doesn't block every future trigger
+    forever.
+
+    The write is a single `UPDATE ... WHERE id = :id AND
+    status = 'running'` (via SQLAlchemy's `update()`, not a `SELECT`
+    followed by a separate `UPDATE`) so a run that finishes naturally in
+    the gap between an operator's decision to cancel and this request
+    landing is never incorrectly cancelled -- `result.rowcount` is the
+    single source of truth for whether this request actually won the
+    race, not a preceding read.
+
+    - `rowcount == 1`: the row was `"running"` and is now `"cancelled"`.
+      Releases `pipeline_lock` (guarded by `if lock.locked()`, since
+      `asyncio.Lock.release()` has no owner check and raises on an
+      already-unlocked lock -- this release is forced regardless of
+      which coroutine originally acquired it) and returns `200` with the
+      updated row as a `PipelineRunSummary`.
+    - `rowcount == 0` and the id exists: the row was already terminal
+      (`"ok"`, `"partial"`, `"failed"`, or already `"cancelled"`) --
+      returns `409` with a body explaining the run isn't running. Not a
+      silent no-op.
+    - `rowcount == 0` and the id doesn't exist at all: returns `404`.
+      Distinguishing this from the `409` case costs one extra `SELECT`,
+      run only after the atomic write already missed -- it plays no part
+      in the actual cancel decision, only in choosing which error to
+      report.
+    """
+    cancel_result = await session.execute(
+        update(PipelineRun)
+        .where(PipelineRun.id == run_id, PipelineRun.status == "running")
+        .values(status="cancelled", finished_at=datetime.now(UTC), error=CANCELLED_ERROR)
+    )
+    await session.commit()
+
+    # `AsyncSession.execute()` is typed as returning `Result[Any]`, which
+    # has no `.rowcount` -- but executing a Core `update()` statement
+    # actually returns a `CursorResult` at runtime (it wraps the DBAPI
+    # cursor), which does. Same "the stub is stricter than the runtime
+    # type" situation as the `# type: ignore[arg-type]` uses elsewhere in
+    # this codebase (e.g. `events.py`, `notify.py`).
+    if cancel_result.rowcount == 1:  # type: ignore[attr-defined]
+        lock: asyncio.Lock = request.app.state.pipeline_lock
+        if lock.locked():
+            lock.release()
+        result = await session.execute(select(PipelineRun).where(PipelineRun.id == run_id))
+        run = result.scalar_one()
+        return JSONResponse(content=_to_summary(run).model_dump(mode="json"))
+
+    result = await session.execute(select(PipelineRun).where(PipelineRun.id == run_id))
+    existing_run = result.scalar_one_or_none()
+    if existing_run is None:
+        return JSONResponse(status_code=404, content={"detail": f"pipeline run {run_id} not found"})
+    detail = f"pipeline run {run_id} is not running (status={existing_run.status!r})"
+    return JSONResponse(status_code=409, content={"detail": detail})
 
 
 @router.get("/pipeline/runs")
