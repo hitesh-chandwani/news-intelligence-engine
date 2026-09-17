@@ -39,7 +39,19 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Downgrade schema."""
+    """Downgrade schema.
+
+    Unlike a plain `ADD COLUMN` migration's downgrade (e.g. `811868a6c491`/
+    `df8eaf89f74b`/`42abf5f1004e`, always safe to drop regardless of data),
+    this re-narrows an existing `CheckConstraint` -- Postgres will correctly
+    refuse this downgrade (`CheckViolationError`) once any `pipeline_run`
+    row has `status = 'cancelled'`, e.g. from the cancel endpoint (#53) or
+    from this repo's own test suite creating one against the shared,
+    never-truncated Compose Postgres. That failure is the DB doing its job,
+    not a bug in this migration -- downgrading below a constraint value
+    real data already uses is inherently unsafe, and there is no data
+    transformation here (unlike a column drop) that could make it safe.
+    """
     op.drop_constraint("ck_pipeline_run_status", "pipeline_run", type_="check")
     op.create_check_constraint(
         "ck_pipeline_run_status",
