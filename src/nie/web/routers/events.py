@@ -27,6 +27,13 @@ router's private helpers, but do avoid outright duplicating a big one"
 tradeoff. It is also bodyless (`?verdict=<value>`, no JSON body), so
 neither #35's `hx-ext="json-enc"` requirement nor #36's checkbox bug class
 applies to it either.
+
+`DELETE /events/{id}/feedback/{feedback_id}` (#51) lives here too, next
+to `submit_event_feedback`, for the same "already owns `_get_event_or_404`/
+`_build_detail`" reasoning: an "Undo" control shown alongside the
+confirmation `submit_event_feedback` just rendered has to re-render that
+same rich fragment (or `partials/notification_list.html`, via the same
+`HX-Target` branching) once the just-created row is deleted.
 """
 
 from __future__ import annotations
@@ -41,7 +48,13 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nie.feedback import EventNotFoundError, UnknownVerdictError, submit_feedback
+from nie.feedback import (
+    EventNotFoundError,
+    FeedbackNotFoundError,
+    UnknownVerdictError,
+    submit_feedback,
+    withdraw_feedback,
+)
 from nie.models import (
     Category,
     Event,
@@ -493,14 +506,17 @@ async def submit_event_feedback(
     - `HX-Target: notification-list` -> re-renders `partials/
       notification_list.html` for the feedback's watch (same fragment
       `mark_notification_read` re-renders), with `feedback_submitted_event_id`/
-      `feedback_submitted_verdict`/`feedback_submitted_note` in the
-      template context so the submitting notification's row shows a
-      confirmation (with the note, when non-blank).
+      `feedback_submitted_verdict`/`feedback_submitted_note`/
+      `feedback_submitted_id` in the template context so the submitting
+      notification's row shows a confirmation (with the note, when
+      non-blank) and an "Undo" control (#51) targeting the just-created
+      row's id.
     - anything else while `HX-Request: true` (including `HX-Target:
       event-detail`, or no `HX-Target` at all) -> re-renders `partials/
       event_detail.html` for `event_id`, with `feedback_submitted`/
-      `feedback_submitted_note` in the template context so the
-      confirmation renders there instead.
+      `feedback_submitted_note`/`feedback_submitted_id` in the template
+      context so the confirmation and its "Undo" control (#51) render
+      there instead.
     - no `HX-Request` header -> `200 application/json`, `FeedbackResponse`.
     """
     try:
@@ -523,6 +539,7 @@ async def submit_event_feedback(
                     "feedback_submitted_event_id": feedback.event_id,
                     "feedback_submitted_verdict": feedback.verdict,
                     "feedback_submitted_note": feedback.note,
+                    "feedback_submitted_id": feedback.id,
                 },
             )
 
@@ -535,7 +552,74 @@ async def submit_event_feedback(
                 "event": detail,
                 "feedback_submitted": feedback.verdict,
                 "feedback_submitted_note": feedback.note,
+                "feedback_submitted_id": feedback.id,
             },
         )
 
     return JSONResponse(content=_to_feedback_response(feedback).model_dump(mode="json"))
+
+
+@router.delete("/events/{event_id}/feedback/{feedback_id}")
+async def withdraw_event_feedback(
+    request: Request,
+    event_id: uuid.UUID,
+    feedback_id: uuid.UUID,
+    session: SessionDep,
+) -> Response:
+    """Withdraw ("Undo", #51) a just-submitted `Feedback` row via
+    `nie.feedback.withdraw_feedback`, hard-deleting it (`design.md` §4's
+    `feedback` schema is unchanged -- no soft delete).
+
+    `withdraw_feedback` is HTTP-agnostic and raises `FeedbackNotFoundError`
+    (a `ValueError` subclass) when no `feedback` row with `feedback_id`
+    exists, or when it exists but its `event_id` doesn't match the path's
+    `event_id`; that translates to `404` here, same pattern
+    `submit_event_feedback` uses for `EventNotFoundError`/
+    `UnknownVerdictError` and `_get_context_item_or_404`/
+    `_get_event_or_404` use for their own not-found cases. A double-
+    withdraw (already-deleted `feedback_id`, e.g. a double-click on Undo)
+    finds nothing on the second call and gets the same `404`, not a
+    silent no-op success.
+
+    On success, response negotiation follows the same `HX-Request`/
+    `HX-Target` convention `submit_event_feedback` documents (htmx sends
+    the target element's id as the `HX-Target` header):
+
+    - `HX-Target: notification-list` -> re-renders `partials/
+      notification_list.html` for the Silver watch (single-watch MVP,
+      same `_get_silver_watch` resolution every other router in this
+      module uses), with no `feedback_submitted_event_id` in the
+      template context -- the withdrawn row is gone, so that
+      notification's confirmation clears.
+    - anything else while `HX-Request: true` (including `HX-Target:
+      event-detail`, or no `HX-Target` at all) -> re-renders `partials/
+      event_detail.html` for `event_id`, with no `feedback_submitted` in
+      the template context -- the fragment renders back to its plain
+      5-verdict-button state.
+    - no `HX-Request` header -> `204 No Content`, empty body, same
+      convention `DELETE /context/{item_id}` (#35) already uses.
+    """
+    try:
+        await withdraw_feedback(session, event_id, feedback_id)
+    except FeedbackNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    if request.headers.get("HX-Request"):
+        templates: Jinja2Templates = request.app.state.templates
+        if request.headers.get("HX-Target") == "notification-list":
+            watch = await _get_silver_watch(session)
+            notifications = await list_notifications(session, watch.id)
+            responses = [_notification_to_response(item) for item in notifications]
+            return templates.TemplateResponse(
+                request,
+                "partials/notification_list.html",
+                {"notifications": responses},
+            )
+
+        event = await _get_event_or_404(session, event_id)
+        detail = await _build_detail(session, event)
+        return templates.TemplateResponse(
+            request, "partials/event_detail.html", {"event": detail}
+        )
+
+    return Response(status_code=204)
