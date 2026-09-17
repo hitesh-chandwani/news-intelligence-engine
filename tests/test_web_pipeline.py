@@ -48,7 +48,9 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -59,7 +61,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nie.db import create_engine, create_session_factory
-from nie.models import Watch
+from nie.models import PipelineRun, Watch
 from nie.pipeline import adjudicate as adjudicate_module
 from nie.pipeline import relate as relate_module
 from nie.pipeline import score as score_module
@@ -339,3 +341,113 @@ async def test_lock_is_the_same_instance_scheduler_and_router_share(
     app = create_app()
     assert isinstance(app.state.pipeline_lock, asyncio.Lock)
     assert not app.state.pipeline_lock.locked()
+
+
+async def _insert_pipeline_run(
+    session_factory: async_sessionmaker[AsyncSession],
+    status: str,
+    *,
+    finished_at: datetime | None = None,
+    error: str | None = None,
+) -> uuid.UUID:
+    """Insert a `pipeline_run` row directly in the DB with no real
+    in-flight `run_pipeline()` coroutine behind it -- the "simpler,
+    valid case per `_docs/testing-guidelines.md`" the #53 issue calls
+    for, as distinct from `test_pipeline_runner.py`'s
+    `test_external_cancel_survives_run_pipelines_own_closing_write`
+    which drives a real (stubbed) in-flight coroutine.
+    """
+    async with session_factory() as session:
+        run = PipelineRun(
+            trigger="manual", status=status, stats={}, finished_at=finished_at, error=error
+        )
+        session.add(run)
+        await session.commit()
+        return run.id
+
+
+async def test_cancel_running_run_returns_200_cancels_row_and_releases_lock(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """`POST /pipeline/runs/{run_id}/cancel` on a `status="running"` row
+    (no real in-flight coroutine, just the row) returns `200`, sets
+    `status="cancelled"`/`finished_at`/`error`, and force-releases
+    `app.state.pipeline_lock` even though this test -- standing in for
+    whatever originally acquired it -- never releases it itself.
+    """
+    run_id = await _insert_pipeline_run(session_factory, "running")
+
+    app = create_app()
+
+    async def _override_get_session() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_session] = _override_get_session
+
+    lock: asyncio.Lock = app.state.pipeline_lock
+    await lock.acquire()
+    try:
+        assert lock.locked()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(f"/pipeline/runs/{run_id}/cancel")
+    finally:
+        # The endpoint itself is expected to have already force-released
+        # the lock on a successful cancel -- guard the same way it does
+        # rather than double-releasing an already-unlocked asyncio.Lock
+        # (which raises).
+        if lock.locked():
+            lock.release()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body.keys()) == _PIPELINE_RUN_SUMMARY_FIELDS
+    assert body["id"] == str(run_id)
+    assert body["status"] == "cancelled"
+    assert body["error"] == pipeline_router_module.CANCELLED_ERROR
+    assert body["finished_at"] is not None
+    assert not lock.locked()
+
+    async with session_factory() as session:
+        run = await session.get(PipelineRun, run_id)
+        assert run is not None
+        assert run.status == "cancelled"
+        assert run.error == pipeline_router_module.CANCELLED_ERROR
+        assert run.finished_at is not None
+
+
+@pytest.mark.parametrize("status", ["ok", "partial", "failed", "cancelled"])
+async def test_cancel_terminal_run_returns_409_and_does_not_modify_row(
+    session_factory: async_sessionmaker[AsyncSession],
+    status: str,
+) -> None:
+    """A run whose DB `status` is already terminal -- including already
+    `"cancelled"` -- is rejected with `409`, not silently no-op'd, and
+    the row is left exactly as it was.
+    """
+    finished_at = datetime.now(UTC)
+    run_id = await _insert_pipeline_run(
+        session_factory, status, finished_at=finished_at, error="pre-existing"
+    )
+
+    async with _make_client(session_factory) as client:
+        response = await client.post(f"/pipeline/runs/{run_id}/cancel")
+
+    assert response.status_code == 409
+    assert "not running" in response.json()["detail"]
+
+    async with session_factory() as session:
+        run = await session.get(PipelineRun, run_id)
+        assert run is not None
+        assert run.status == status
+        assert run.error == "pre-existing"
+        assert run.finished_at == finished_at
+
+
+async def test_cancel_unknown_run_id_returns_404(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with _make_client(session_factory) as client:
+        response = await client.post(f"/pipeline/runs/{uuid.uuid4()}/cancel")
+
+    assert response.status_code == 404

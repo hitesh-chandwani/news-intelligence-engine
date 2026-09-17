@@ -107,12 +107,16 @@ own Files: list, but wiring into STAGE_REGISTRY breaks this pre-existing
 end-to-end assertion otherwise" precedent as #24/#25/#26/#28/#29 above.
 """
 
+import asyncio
+import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from alembic.command import upgrade
 from alembic.config import Config
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nie.db import create_engine, create_session_factory
@@ -438,3 +442,86 @@ async def test_all_raising_stages_produce_a_failed_run(
         assert run.status == "failed"
         assert run.stats["first"] == {"error": "boom"}
         assert run.stats["second"] == {"error": "boom"}
+
+
+async def test_external_cancel_survives_run_pipelines_own_closing_write(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Proves the #53 clobber fix: `run_pipeline`'s own closing write must
+    not overwrite a `"cancelled"` status set by a concurrent cancel while
+    a stage is still in flight.
+
+    A substitute for a genuinely concurrent hung LLM call, per
+    `_docs/testing-guidelines.md` and the issue's own acceptance
+    criterion: this injects a stage stub (via `run_pipeline`'s `stages`
+    parameter) that blocks on a controllable `asyncio.Event` instead of
+    doing real I/O. `run_pipeline` is started as a background task; once
+    the stub signals it has been entered (and has looked up its own
+    run's id -- `run_pipeline` doesn't return the id until it finishes,
+    so the stub has to report it itself), the test cancels that row
+    directly in the DB via a *separate* session -- exactly the atomic
+    `UPDATE ... WHERE status = 'running'` the new cancel endpoint itself
+    uses, not a select-then-write. Only then is the blocking event
+    released, letting the stub return and `run_pipeline` reach its own
+    closing write. That closing write's `WHERE status = 'running'` guard
+    must find the row already moved to `'cancelled'` and no-op, leaving
+    the final DB status `'cancelled'` rather than clobbering it back to
+    `'ok'`.
+
+    The stub finds its own row by `status == "running"` ordered by
+    `started_at desc, limit 1` rather than a bare `scalar_one()` on that
+    filter -- this shared, never-truncated dev DB already has a couple of
+    genuinely stuck `"running"` rows predating this fix (orphaned by
+    exactly the race this issue describes, before `run_pipeline`'s
+    closing write was made conditional), and a bare `scalar_one()` raises
+    `MultipleResultsFound` against those instead of matching this test's
+    own just-inserted row, which sorts last by `started_at`.
+    """
+    stage_entered = asyncio.Event()
+    release_stage = asyncio.Event()
+    captured_run_id: uuid.UUID | None = None
+
+    async def _blocking_stage(session: AsyncSession) -> dict[str, int]:
+        nonlocal captured_run_id
+        result = await session.execute(
+            select(PipelineRun.id)
+            .where(PipelineRun.status == "running")
+            .order_by(PipelineRun.started_at.desc())
+            .limit(1)
+        )
+        captured_run_id = result.scalar_one()
+        stage_entered.set()
+        await release_stage.wait()
+        return {"blocked": 1}
+
+    stages = [("blocking", _blocking_stage)]
+    task = asyncio.create_task(run_pipeline(session_factory, trigger="manual", stages=stages))
+
+    await asyncio.wait_for(stage_entered.wait(), timeout=5)
+    assert captured_run_id is not None
+
+    # Cancel the row via a separate session/connection while the stub
+    # above is still blocked inside run_pipeline's own session -- the
+    # same atomic conditional UPDATE the cancel endpoint performs.
+    async with session_factory() as cancel_session:
+        cancel_result = await cancel_session.execute(
+            update(PipelineRun)
+            .where(PipelineRun.id == captured_run_id, PipelineRun.status == "running")
+            .values(
+                status="cancelled",
+                finished_at=datetime.now(UTC),
+                error="cancelled by operator",
+            )
+        )
+        await cancel_session.commit()
+        assert cancel_result.rowcount == 1  # type: ignore[attr-defined]
+
+    release_stage.set()
+    finished_run_id = await asyncio.wait_for(task, timeout=5)
+    assert finished_run_id == captured_run_id
+
+    async with session_factory() as session:
+        run = await session.get(PipelineRun, captured_run_id)
+        assert run is not None
+        assert run.status == "cancelled"
+        assert run.error == "cancelled by operator"
