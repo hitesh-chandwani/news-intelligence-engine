@@ -12,15 +12,61 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import update
 
+from nie.db import async_session_factory
+from nie.models import PipelineRun
 from nie.scheduler import create_scheduler
 from nie.web.routers import context, dashboard, events, notifications, pipeline, preferences, watch
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
+
+# Distinguishes a startup-swept orphan (#60) from a normal stage-raised
+# failure in the `error` column at a glance -- see `_reconcile_orphaned_
+# pipeline_runs`'s docstring.
+ORPHANED_RUN_ERROR = "orphaned: process restarted while this run was still marked running"
+
+
+async def _reconcile_orphaned_pipeline_runs() -> None:
+    """Sweep every `pipeline_run` row still `status="running"` at process
+    startup -- these can only be left over from a *previous* process that
+    exited without going through `_lifespan`'s graceful-shutdown path
+    (`kill -9`, OOM, a crash); see #60.
+
+    Runs before `scheduler.start()` and before any request has been
+    served on this process, so `app.state.pipeline_tasks` is guaranteed
+    empty at this point -- there is no legitimate in-progress run this
+    process could confuse with an orphan, and no age threshold or lock
+    force-release is needed (confirmed in #60's grooming). A single bulk
+    `UPDATE ... WHERE status = 'running'` (no per-row loop) moves every
+    such row to `status="failed"` (reusing the existing terminal status
+    and `error` free-text column, same pattern as `pipeline.py`'s
+    `CANCELLED_ERROR` -- no new status value, no new migration) with a
+    distinct `error` message so it's greppable/distinguishable from a
+    normal stage failure in the UI/API, and stamps `finished_at` so it
+    stops showing as perpetually in-progress.
+
+    Uses `async_session_factory` directly (`nie.db`) rather than a
+    request-scoped `SessionDep` -- `_lifespan` has no request to inject
+    one from, same reasoning `nie.pipeline.runner.run_pipeline` uses for
+    its own default `session_factory` argument.
+
+    Out of scope (see #60): multiple concurrently-live processes/workers
+    sharing one DB -- not this app's deployment model, `design.md`
+    §17/§18's single Uvicorn process.
+    """
+    async with async_session_factory() as session:
+        await session.execute(
+            update(PipelineRun)
+            .where(PipelineRun.status == "running")
+            .values(status="failed", error=ORPHANED_RUN_ERROR, finished_at=datetime.now(UTC))
+        )
+        await session.commit()
 
 
 @asynccontextmanager
@@ -32,6 +78,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     `@app.on_event` hook -- per `design.md` §17, Uvicorn starting this one
     process is what "also starts the APScheduler job".
 
+    On startup, before the scheduler starts accepting ticks, first sweeps
+    orphaned `pipeline_run` rows (#60) via `_reconcile_orphaned_pipeline_
+    runs` -- a previous process that exited via `kill -9`/OOM/a crash
+    (rather than this function's own graceful-shutdown path below) can
+    leave a row behind still `status="running"` with nothing left to ever
+    move it to a terminal status. See that function's own docstring.
+
     Passes `app.state.pipeline_lock` (set in `create_app()`, not here --
     see that function's docstring) through to `create_scheduler` (#43) so
     the scheduled job and `POST /pipeline/run` share the same
@@ -40,15 +93,15 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     On shutdown (#54), also cancels every `asyncio.Task` still tracked in
     `app.state.pipeline_tasks` -- a background run spawned by
     `POST /pipeline/run` that is still in flight when the app shuts down
-    gracefully (as opposed to `kill -9`/OOM, which is out of scope, see
-    #60) must not be silently dropped or orphaned. Tasks are cancelled
-    and then awaited (`asyncio.gather(..., return_exceptions=True)`) so
-    shutdown doesn't proceed while a task is still mid-cleanup, but each
-    task's own background wrapper is responsible for releasing
+    gracefully must not be silently dropped or orphaned. Tasks are
+    cancelled and then awaited (`asyncio.gather(..., return_exceptions=
+    True)`) so shutdown doesn't proceed while a task is still mid-cleanup,
+    but each task's own background wrapper is responsible for releasing
     `pipeline_lock` and popping its own `pipeline_tasks` entry in a
     `finally`, so this never hangs waiting on real pipeline I/O -- only
     on each task noticing the cancellation at its next `await` point.
     """
+    await _reconcile_orphaned_pipeline_runs()
     scheduler = create_scheduler(lock=app.state.pipeline_lock)
     scheduler.start()
     try:
