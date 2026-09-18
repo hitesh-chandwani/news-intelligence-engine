@@ -199,9 +199,9 @@ even though the MVP seeds exactly one Watch. Timestamps are `timestamptz`.
 | id | uuid pk | |
 | trigger | text | `schedule` \| `manual` |
 | started_at, finished_at | timestamptz | |
-| status | text | `running` \| `ok` \| `partial` \| `failed` |
+| status | text | `running` \| `ok` \| `partial` \| `failed` \| `cancelled` |
 | stats | jsonb | per-stage counts (discovered, extracted, new_events, updated_events, notified, errors) |
-| error | text null | |
+| error | text null | populated for `failed`/`cancelled`; on app startup, any row still `running` from a previous process (unclean exit) is swept to `failed` with a distinct orphan message rather than a new status value |
 
 ---
 
