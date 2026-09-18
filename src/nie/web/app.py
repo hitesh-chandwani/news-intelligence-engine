@@ -9,6 +9,7 @@ per-app without leaking state between tests, same reasoning
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -35,6 +36,18 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     see that function's docstring) through to `create_scheduler` (#43) so
     the scheduled job and `POST /pipeline/run` share the same
     `asyncio.Lock` instance and never run `run_pipeline` concurrently.
+
+    On shutdown (#54), also cancels every `asyncio.Task` still tracked in
+    `app.state.pipeline_tasks` -- a background run spawned by
+    `POST /pipeline/run` that is still in flight when the app shuts down
+    gracefully (as opposed to `kill -9`/OOM, which is out of scope, see
+    #60) must not be silently dropped or orphaned. Tasks are cancelled
+    and then awaited (`asyncio.gather(..., return_exceptions=True)`) so
+    shutdown doesn't proceed while a task is still mid-cleanup, but each
+    task's own background wrapper is responsible for releasing
+    `pipeline_lock` and popping its own `pipeline_tasks` entry in a
+    `finally`, so this never hangs waiting on real pipeline I/O -- only
+    on each task noticing the cancellation at its next `await` point.
     """
     scheduler = create_scheduler(lock=app.state.pipeline_lock)
     scheduler.start()
@@ -42,6 +55,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         scheduler.shutdown(wait=False)
+        tasks: dict[uuid.UUID, asyncio.Task[None]] = app.state.pipeline_tasks
+        if tasks:
+            for task in tasks.values():
+                task.cancel()
+            await asyncio.gather(*tasks.values(), return_exceptions=True)
 
 
 def create_app() -> FastAPI:
@@ -62,10 +80,23 @@ def create_app() -> FastAPI:
     exercised the same way. Creating exactly one `asyncio.Lock()` here
     keeps it a true process-local singleton, shared by the scheduler
     (via `_lifespan`, above) and the pipeline router.
+
+    `app.state.pipeline_tasks: dict[uuid.UUID, asyncio.Task]` (#54) is
+    set here for the same reason: a plain dict, empty at startup, keyed
+    by `PipelineRun.id`, holding a live reference to every in-flight
+    background run `POST /pipeline/run` spawns via
+    `asyncio.create_task()` -- `asyncio` itself only keeps a weak
+    reference to a created task, so an otherwise-unreferenced one risks
+    being garbage-collected mid-run. `trigger_pipeline_run`
+    (`src/nie/web/routers/pipeline.py`) stores the task here immediately
+    after creating it, and the background wrapper it spawns pops its own
+    entry in a `finally` block, so this dict always reflects exactly
+    which runs currently have a live task backing them.
     """
     app = FastAPI(title="News Intelligence Engine", lifespan=_lifespan)
     app.state.templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     app.state.pipeline_lock = asyncio.Lock()
+    app.state.pipeline_tasks = {}
     app.include_router(watch.router)
     app.include_router(context.router)
     app.include_router(preferences.router)
