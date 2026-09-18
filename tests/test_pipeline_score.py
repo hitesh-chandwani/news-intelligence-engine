@@ -474,6 +474,11 @@ async def test_build_context_bundle_related_events_empty_when_no_relations_or_ne
 async def test_build_context_bundle_feedback_summary_buckets_by_category_and_window(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Also covers #57's multi-category note duplication: the `event_x`
+    "useful" feedback row below carries a `note`, and `event_x` is linked
+    to both `markets` and `policy` -- that note must appear in both
+    buckets' `notes`, mirroring `count`'s existing double-count-by-design
+    behavior for the same row."""
     now = datetime.now(UTC)
     window_days = 10
     inside_buffer = now - timedelta(days=window_days) + timedelta(minutes=5)
@@ -516,11 +521,13 @@ async def test_build_context_bundle_feedback_summary_buckets_by_category_and_win
 
         session.add_all(
             [
-                # Multi-category double-count: one row, two buckets bumped.
+                # Multi-category double-count: one row, two buckets bumped
+                # -- and (#57) its note surfaced in both buckets' `notes`.
                 Feedback(
                     watch_id=watch.id,
                     event_id=event_x.id,
                     verdict="useful",
+                    note="Great catch on the mine strike.",
                     created_at=now - timedelta(days=2),
                 ),
                 Feedback(
@@ -565,12 +572,237 @@ async def test_build_context_bundle_feedback_summary_buckets_by_category_and_win
         )
 
     assert bundle.feedback_summary == [
-        FeedbackBucket(category_slug=markets.slug, verdict="less_of_this", count=1),
-        FeedbackBucket(category_slug=markets.slug, verdict="not_useful", count=1),
-        FeedbackBucket(category_slug=markets.slug, verdict="useful", count=2),
-        FeedbackBucket(category_slug=policy.slug, verdict="less_of_this", count=1),
-        FeedbackBucket(category_slug=policy.slug, verdict="useful", count=1),
+        FeedbackBucket(category_slug=markets.slug, verdict="less_of_this", count=1, notes=[]),
+        FeedbackBucket(category_slug=markets.slug, verdict="not_useful", count=1, notes=[]),
+        FeedbackBucket(
+            category_slug=markets.slug,
+            verdict="useful",
+            count=2,
+            notes=["Great catch on the mine strike."],
+        ),
+        FeedbackBucket(category_slug=policy.slug, verdict="less_of_this", count=1, notes=[]),
+        FeedbackBucket(
+            category_slug=policy.slug,
+            verdict="useful",
+            count=1,
+            notes=["Great catch on the mine strike."],
+        ),
     ]
+
+
+# ---------------------------------------------------------------------------
+# build_context_bundle -- feedback notes (#57)
+# ---------------------------------------------------------------------------
+
+
+async def test_build_context_bundle_feedback_notes_excludes_blank_and_null_notes(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A bucket mixing noted and note-less rows: `count` includes every
+    row, but `notes` only ever carries the non-blank ones -- a `None`
+    note (the normal `submit_feedback` shape for "no note given") and a
+    whitespace-only note (simulating a row written some other way, since
+    `submit_feedback` itself already normalizes blank input to `None`)
+    both contribute to `count` and both stay out of `notes`."""
+    async with session_factory() as session:
+        watch = await _make_watch(session)
+        await seed_categories(session)
+        markets_result = await session.execute(select(Category).where(Category.slug == "market"))
+        markets = markets_result.scalar_one()
+
+        event = _make_event(watch.id, embedding=ANCHOR_EMBEDDING, title="Noted event")
+        session.add(event)
+        await session.commit()
+        await session.refresh(event)
+
+        session.add(EventCategory(event_id=event.id, category_id=markets.id))
+        await session.commit()
+
+        now = datetime.now(UTC)
+        session.add_all(
+            [
+                Feedback(
+                    watch_id=watch.id,
+                    event_id=event.id,
+                    verdict="useful",
+                    note="This one has real text.",
+                    created_at=now - timedelta(minutes=1),
+                ),
+                Feedback(
+                    watch_id=watch.id,
+                    event_id=event.id,
+                    verdict="useful",
+                    note=None,
+                    created_at=now - timedelta(minutes=2),
+                ),
+                Feedback(
+                    watch_id=watch.id,
+                    event_id=event.id,
+                    verdict="useful",
+                    note="   ",
+                    created_at=now - timedelta(minutes=3),
+                ),
+            ]
+        )
+        await session.commit()
+
+        bundle = await build_context_bundle(session, watch, event, vector_limit=0)
+
+    assert bundle.feedback_summary == [
+        FeedbackBucket(
+            category_slug=markets.slug,
+            verdict="useful",
+            count=3,
+            notes=["This one has real text."],
+        ),
+    ]
+
+
+async def test_build_context_bundle_feedback_notes_caps_at_five_most_recent(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A bucket with more than `FEEDBACK_NOTES_PER_BUCKET` (5) noted rows
+    only carries its 5 newest, ordered `created_at` descending; `count`
+    still reflects all of them."""
+    async with session_factory() as session:
+        watch = await _make_watch(session)
+        await seed_categories(session)
+        markets_result = await session.execute(select(Category).where(Category.slug == "market"))
+        markets = markets_result.scalar_one()
+
+        event = _make_event(watch.id, embedding=ANCHOR_EMBEDDING, title="Popular event")
+        session.add(event)
+        await session.commit()
+        await session.refresh(event)
+
+        session.add(EventCategory(event_id=event.id, category_id=markets.id))
+        await session.commit()
+
+        now = datetime.now(UTC)
+        # 7 noted rows, newest first: note-0 is most recent, note-6 oldest.
+        session.add_all(
+            [
+                Feedback(
+                    watch_id=watch.id,
+                    event_id=event.id,
+                    verdict="useful",
+                    note=f"note-{i}",
+                    created_at=now - timedelta(minutes=i),
+                )
+                for i in range(7)
+            ]
+        )
+        await session.commit()
+
+        bundle = await build_context_bundle(session, watch, event, vector_limit=0)
+
+    assert bundle.feedback_summary == [
+        FeedbackBucket(
+            category_slug=markets.slug,
+            verdict="useful",
+            count=7,
+            notes=["note-0", "note-1", "note-2", "note-3", "note-4"],
+        ),
+    ]
+
+
+async def test_build_context_bundle_feedback_notes_truncated_over_char_limit(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A note longer than `FEEDBACK_NOTE_CHAR_LIMIT` (200) chars is cut to
+    the first 200 with a trailing "..." marker; a note at or under the
+    limit is left verbatim, with no marker appended."""
+    async with session_factory() as session:
+        watch = await _make_watch(session)
+        await seed_categories(session)
+        markets_result = await session.execute(select(Category).where(Category.slug == "market"))
+        markets = markets_result.scalar_one()
+
+        event = _make_event(watch.id, embedding=ANCHOR_EMBEDDING, title="Verbose feedback event")
+        session.add(event)
+        await session.commit()
+        await session.refresh(event)
+
+        session.add(EventCategory(event_id=event.id, category_id=markets.id))
+        await session.commit()
+
+        now = datetime.now(UTC)
+        long_note = "x" * 250
+        exact_note = "y" * 200
+        session.add_all(
+            [
+                Feedback(
+                    watch_id=watch.id,
+                    event_id=event.id,
+                    verdict="useful",
+                    note=long_note,
+                    created_at=now - timedelta(minutes=1),
+                ),
+                Feedback(
+                    watch_id=watch.id,
+                    event_id=event.id,
+                    verdict="not_useful",
+                    note=exact_note,
+                    created_at=now - timedelta(minutes=1),
+                ),
+            ]
+        )
+        await session.commit()
+
+        bundle = await build_context_bundle(session, watch, event, vector_limit=0)
+
+    bucket_by_verdict = {bucket.verdict: bucket for bucket in bundle.feedback_summary}
+    assert bucket_by_verdict["useful"].notes == [("x" * 200) + "..."]
+    assert bucket_by_verdict["not_useful"].notes == [exact_note]
+
+
+async def test_build_context_bundle_feedback_note_disappears_after_withdrawal(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A withdrawn (hard-deleted, #51) `Feedback` row's note no longer
+    appears on the next `build_context_bundle` call -- no special-casing
+    needed, since the query reads live table state."""
+    async with session_factory() as session:
+        watch = await _make_watch(session)
+        await seed_categories(session)
+        markets_result = await session.execute(select(Category).where(Category.slug == "market"))
+        markets = markets_result.scalar_one()
+
+        event = _make_event(watch.id, embedding=ANCHOR_EMBEDDING, title="Withdrawable event")
+        session.add(event)
+        await session.commit()
+        await session.refresh(event)
+
+        session.add(EventCategory(event_id=event.id, category_id=markets.id))
+        await session.commit()
+
+        feedback = Feedback(
+            watch_id=watch.id,
+            event_id=event.id,
+            verdict="useful",
+            note="I will withdraw this.",
+            created_at=datetime.now(UTC),
+        )
+        session.add(feedback)
+        await session.commit()
+
+        bundle_before = await build_context_bundle(session, watch, event, vector_limit=0)
+        assert bundle_before.feedback_summary == [
+            FeedbackBucket(
+                category_slug=markets.slug,
+                verdict="useful",
+                count=1,
+                notes=["I will withdraw this."],
+            ),
+        ]
+
+        # Hard-delete, same effect as `withdraw_feedback` (#51).
+        await session.delete(feedback)
+        await session.commit()
+
+        bundle_after = await build_context_bundle(session, watch, event, vector_limit=0)
+
+    assert bundle_after.feedback_summary == []
 
 
 # ---------------------------------------------------------------------------
@@ -819,6 +1051,7 @@ async def test_score_stage_renders_full_context_bundle_in_prompt(
                 watch_id=watch.id,
                 event_id=anchor.id,
                 verdict="useful",
+                note="Great catch on the timing of this one.",
                 created_at=datetime.now(UTC),
             )
         )
@@ -843,13 +1076,96 @@ async def test_score_stage_renders_full_context_bundle_in_prompt(
     assert "relation:precedes" in prompt_content
     assert "Apple" in prompt_content
 
-    # Feedback summary line.
+    # Feedback summary line, plus (#57) its note text literally present
+    # in the rendered message sent to the stub client -- not just on the
+    # ContextBundle object.
     assert "market: 1 x 'useful'" in prompt_content
+    assert "Great catch on the timing of this one." in prompt_content
 
     # The event itself, last.
     assert "Anchor event to be scored" in prompt_content
 
     assert anchor_id is not None
+
+
+async def test_score_stage_feedback_summary_count_only_line_unchanged_without_notes(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """(#57) A bucket with zero noted rows keeps its exact
+    `"<slug>: <count> x '<verdict>'"` count-only line, with no `notes:`
+    sub-line beneath it -- even while a sibling bucket (for a different
+    category) that does have a note gets one."""
+    client, stub_create = _client_with_stubbed_create()
+    stub_create.return_value = _FakeChatCompletion(
+        '{"relevance": "medium", "importance": "medium", '
+        '"impact_direction": "neutral", "impact_reason": "Some reason.", '
+        '"impact_confidence": "medium"}'
+    )
+
+    async with session_factory() as session:
+        watch = await _make_watch(session)
+        await seed_categories(session)
+        markets_result = await session.execute(select(Category).where(Category.slug == "market"))
+        markets = markets_result.scalar_one()
+        price_result = await session.execute(select(Category).where(Category.slug == "price"))
+        price = price_result.scalar_one()
+
+        anchor = _make_event(watch.id, embedding=ANCHOR_EMBEDDING, title="Anchor to be scored")
+        noteless_event = _make_event(
+            watch.id, embedding=DIST_0_EMBEDDING, title="Noteless feedback event"
+        )
+        noted_event = _make_event(
+            watch.id, embedding=DIST_1_EMBEDDING, title="Noted feedback event"
+        )
+        noteless_event.relevance = "medium"
+        noted_event.relevance = "medium"
+        session.add_all([anchor, noteless_event, noted_event])
+        await session.commit()
+        await session.refresh(noteless_event)
+        await session.refresh(noted_event)
+
+        session.add_all(
+            [
+                EventCategory(event_id=noteless_event.id, category_id=markets.id),
+                EventCategory(event_id=noted_event.id, category_id=price.id),
+            ]
+        )
+        await session.commit()
+
+        session.add_all(
+            [
+                Feedback(
+                    watch_id=watch.id,
+                    event_id=noteless_event.id,
+                    verdict="useful",
+                    created_at=datetime.now(UTC),
+                ),
+                Feedback(
+                    watch_id=watch.id,
+                    event_id=noted_event.id,
+                    verdict="useful",
+                    note="Explains why this was useful.",
+                    created_at=datetime.now(UTC),
+                ),
+            ]
+        )
+        await session.commit()
+
+        result = await score_stage(session, client=client)
+        await session.commit()
+
+    assert result == {"irrelevant": 0, "scored": 1, "skipped": 0, "score_capped": 0}
+
+    prompt_content = stub_create.call_args.kwargs["messages"][0]["content"]
+    prompt_lines = prompt_content.splitlines()
+
+    markets_line_index = prompt_lines.index(f"{markets.slug}: 1 x 'useful'")
+    assert not prompt_lines[markets_line_index + 1].strip().startswith("notes:")
+
+    price_line_index = prompt_lines.index(f"{price.slug}: 1 x 'useful'")
+    assert prompt_lines[price_line_index + 1].strip() == (
+        'notes: "Explains why this was useful."'
+    )
 
 
 async def test_score_stage_does_not_touch_fact_summary_or_interpretation(

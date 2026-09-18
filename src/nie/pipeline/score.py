@@ -231,11 +231,19 @@ async def build_context_bundle(
     )
     bucket_notes: dict[tuple[str, str], list[str]] = {}
     for note_row in notes_result:
+        note_text = note_row.note
+        assert note_text is not None  # excluded by `Feedback.note.isnot(None)` above
+        if not note_text.strip():
+            # `submit_feedback` already normalizes blank/whitespace-only
+            # notes to `None` before insert, so this branch is a
+            # defensive no-op against any row written some other way --
+            # a blank note must never surface here regardless of how it
+            # reached the table.
+            continue
+
         key = (note_row.slug, note_row.verdict)
         notes = bucket_notes.setdefault(key, [])
         if len(notes) < FEEDBACK_NOTES_PER_BUCKET:
-            note_text = note_row.note
-            assert note_text is not None  # excluded by `Feedback.note.isnot(None)` above
             if len(note_text) > FEEDBACK_NOTE_CHAR_LIMIT:
                 note_text = note_text[:FEEDBACK_NOTE_CHAR_LIMIT] + "..."
             notes.append(note_text)
