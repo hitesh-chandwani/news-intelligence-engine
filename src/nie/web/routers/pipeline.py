@@ -43,7 +43,8 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -77,6 +78,14 @@ _MAX_RUNS = 100
 # stage-raised `error` string in the `pipeline_run.error` column.
 CANCELLED_ERROR = "cancelled by operator"
 
+# `POST /pipeline/runs/{run_id}/cancel`'s `HX-Request` branch (#59)
+# re-renders `partials/pipeline_runs.html` with this many most-recent
+# rows -- must match `dashboard.py`'s own `_RECENT_RUNS_LIMIT` (the same
+# constant duplicated here per this codebase's "duplicate small private
+# helpers rather than cross-import" convention) so the fragment swapped
+# in by a cancel is identical in shape to the one `GET /` rendered.
+_RECENT_RUNS_LIMIT = 5
+
 
 def _to_summary(run: PipelineRun) -> PipelineRunSummary:
     return PipelineRunSummary(
@@ -87,6 +96,34 @@ def _to_summary(run: PipelineRun) -> PipelineRunSummary:
         finished_at=run.finished_at,
         stats=run.stats,
         error=run.error,
+    )
+
+
+async def _recent_runs(session: AsyncSession) -> list[PipelineRunSummary]:
+    """The `_RECENT_RUNS_LIMIT` most recent `pipeline_run` rows
+    (`started_at desc`), as `PipelineRunSummary`s -- the same data
+    `dashboard.py`'s own `_recent_pipeline_runs` computes for `GET /`'s
+    "Recent pipeline runs" section (#59), duplicated here (rather than
+    cross-imported) since `cancel_pipeline_run`'s `HX-Request` branch
+    needs to re-render the exact same `partials/pipeline_runs.html`
+    fragment with fresh data after a cancel (success or a lost race).
+    """
+    result = await session.execute(
+        select(PipelineRun).order_by(PipelineRun.started_at.desc()).limit(_RECENT_RUNS_LIMIT)
+    )
+    return [_to_summary(run) for run in result.scalars().all()]
+
+
+async def _render_pipeline_runs_fragment(request: Request, session: AsyncSession) -> Response:
+    """Re-render `partials/pipeline_runs.html` with the current
+    `_recent_runs`, for `cancel_pipeline_run`'s `HX-Request` branch (#59)
+    -- shared by the success path and both the `409`/`404` race paths so
+    every one of them shows the row's real current state.
+    """
+    pipeline_runs = await _recent_runs(session)
+    templates: Jinja2Templates = request.app.state.templates
+    return templates.TemplateResponse(
+        request, "partials/pipeline_runs.html", {"pipeline_runs": pipeline_runs}
     )
 
 
@@ -201,7 +238,7 @@ async def trigger_pipeline_run(request: Request, session: SessionDep) -> JSONRes
 @router.post("/pipeline/runs/{run_id}/cancel")
 async def cancel_pipeline_run(
     request: Request, run_id: uuid.UUID, session: SessionDep
-) -> JSONResponse:
+) -> Response:
     """Mark a `status="running"` `pipeline_run` row `"cancelled"`,
     forcibly release `app.state.pipeline_lock`, and (#54) really
     interrupt the run's tracked `asyncio.Task` if one is present.
@@ -235,6 +272,25 @@ async def cancel_pipeline_run(
       run only after the atomic write already missed -- it plays no part
       in the actual cancel decision, only in choosing which error to
       report.
+
+    **`HX-Request` negotiation (#59).** Same two-way pattern `POST
+    /notifications/{id}/read` (`notifications.py`) already has: when the
+    request carries `HX-Request`, the response is always `200
+    text/html`, the re-rendered `partials/pipeline_runs.html` fragment
+    (via `_recent_runs`) reflecting the DB's current, actual state for
+    every one of the three outcomes above -- including the `409`/`404`
+    races, where the DB write itself did not happen but the fragment
+    still shows that row's real (terminal) status with no Cancel button,
+    never a raw/broken error. `200` rather than passing the `409`/`404`
+    status through to the HTMX branch is deliberate: this app's htmx
+    (`base.html`, v1.9.12, no custom `responseHandling`/`htmx:
+    beforeSwap` config) only swaps content for a `2xx`/`3xx` response by
+    default, so surfacing the original error status here would leave the
+    operator looking at a stale, un-swapped fragment instead of the
+    truthful one this issue asks for. Without `HX-Request`, all three
+    outcomes are completely unchanged from before this issue: the same
+    `200`/`409`/`404` `JSONResponse` bodies, byte-for-byte, for `curl`
+    and the existing non-HTMX tests.
 
     **Real interruption, and its one known limitation.** `task.cancel()`
     raises `asyncio.CancelledError` inside the task's coroutine at its
@@ -281,13 +337,19 @@ async def cancel_pipeline_run(
             task.cancel()
         result = await session.execute(select(PipelineRun).where(PipelineRun.id == run_id))
         run = result.scalar_one()
+        if request.headers.get("HX-Request"):
+            return await _render_pipeline_runs_fragment(request, session)
         return JSONResponse(content=_to_summary(run).model_dump(mode="json"))
 
     result = await session.execute(select(PipelineRun).where(PipelineRun.id == run_id))
     existing_run = result.scalar_one_or_none()
     if existing_run is None:
+        if request.headers.get("HX-Request"):
+            return await _render_pipeline_runs_fragment(request, session)
         return JSONResponse(status_code=404, content={"detail": f"pipeline run {run_id} not found"})
     detail = f"pipeline run {run_id} is not running (status={existing_run.status!r})"
+    if request.headers.get("HX-Request"):
+        return await _render_pipeline_runs_fragment(request, session)
     return JSONResponse(status_code=409, content={"detail": detail})
 
 
