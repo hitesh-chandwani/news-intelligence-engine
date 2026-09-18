@@ -12,6 +12,14 @@
 
   <section>
     <h2>Recent pipeline runs</h2>
+    <button
+      hx-post="/pipeline/run"
+      hx-target="#pipeline-runs"
+      hx-swap="outerHTML"
+      hx-disabled-elt="this"
+    >
+      Trigger now
+    </button>
     {% include "partials/pipeline_runs.html" %}
   </section>
 

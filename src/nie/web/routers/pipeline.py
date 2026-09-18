@@ -162,7 +162,7 @@ async def _run_pipeline_in_background(app: FastAPI, run_id: uuid.UUID) -> None:
 
 
 @router.post("/pipeline/run", status_code=202)
-async def trigger_pipeline_run(request: Request, session: SessionDep) -> JSONResponse:
+async def trigger_pipeline_run(request: Request, session: SessionDep) -> Response:
     """Trigger one pipeline run right now, with `trigger="manual"`,
     returning `202 Accepted` immediately rather than blocking for the
     full run (#54).
@@ -213,10 +213,29 @@ async def trigger_pipeline_run(request: Request, session: SessionDep) -> JSONRes
     response; silently no-op'ing it because the watch happens to be
     disabled would be worse UX than the scheduler's silent skip of an
     unattended interval firing that nobody is watching.
+
+    **`HX-Request` negotiation (#62).** Same two-way pattern
+    `cancel_pipeline_run` already has (#59): when the request carries
+    `HX-Request`, both possible outcomes -- the `409` lock-already-held
+    race above and the `202` success path below -- respond `200
+    text/html` with the re-rendered `partials/pipeline_runs.html`
+    fragment (`_render_pipeline_runs_fragment`) instead of the raw JSON
+    body, so the dashboard's "Trigger now" button always swaps in the
+    section's real current state (the newly running row on success, or
+    the already-in-progress row on a `409` race) rather than a
+    raw/broken error. `200` rather than passing `409` through to the
+    HTMX branch is the same deliberate choice `cancel_pipeline_run`
+    makes, for the same reason: this app's htmx only swaps content for a
+    `2xx`/`3xx` response by default. Without `HX-Request`, both outcomes
+    are completely unchanged from before this issue: the same
+    `202`/`409` `JSONResponse` bodies, byte-for-byte, for `curl` and the
+    existing non-HTMX tests.
     """
     lock: asyncio.Lock = request.app.state.pipeline_lock
 
     if lock.locked():
+        if request.headers.get("HX-Request"):
+            return await _render_pipeline_runs_fragment(request, session)
         return JSONResponse(
             status_code=409, content={"detail": "a pipeline run is already in progress"}
         )
@@ -232,6 +251,8 @@ async def trigger_pipeline_run(request: Request, session: SessionDep) -> JSONRes
     task = asyncio.create_task(_run_pipeline_in_background(request.app, run_id))
     request.app.state.pipeline_tasks[run_id] = task
 
+    if request.headers.get("HX-Request"):
+        return await _render_pipeline_runs_fragment(request, session)
     return JSONResponse(status_code=202, content=_to_summary(run).model_dump(mode="json"))
 
 
