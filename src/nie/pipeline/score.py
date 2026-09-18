@@ -321,13 +321,23 @@ def _format_related_events(related_events: list[RelatedEvent]) -> str:
 def _format_feedback_summary(feedback_summary: list[FeedbackBucket]) -> str:
     """Render one `"<category_slug>: <count> x '<verdict>'"` line per
     bucket, or the explicit "no feedback recorded yet" case for an empty
-    list."""
+    list.
+
+    A bucket with any notes (#57) gets an indented `  notes: "...", "..."`
+    sub-line directly under its count line, listing that bucket's
+    (already recency-capped, char-capped) `notes` sample. A bucket with
+    zero noted rows keeps its count-only line exactly as before -- no
+    sub-line at all, not an empty one.
+    """
     if not feedback_summary:
         return _NO_FEEDBACK_TEXT
-    return "\n".join(
-        f"{bucket.category_slug}: {bucket.count} x '{bucket.verdict}'"
-        for bucket in feedback_summary
-    )
+    lines = []
+    for bucket in feedback_summary:
+        lines.append(f"{bucket.category_slug}: {bucket.count} x '{bucket.verdict}'")
+        if bucket.notes:
+            quoted_notes = ", ".join(f'"{note}"' for note in bucket.notes)
+            lines.append(f"  notes: {quoted_notes}")
+    return "\n".join(lines)
 
 
 def _build_messages(event: Event, bundle: ContextBundle) -> list[dict[str, str]]:

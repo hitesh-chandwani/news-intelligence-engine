@@ -17,7 +17,10 @@ Related historical events (nearest/most-linked first):
 {related_events}
 
 Feedback summary (how this watch's users have reacted to past events, by
-category):
+category). A bucket's `notes` line, when present, is a recency-capped
+sample of that bucket's free-text feedback elaborating on its verdicts --
+not an exhaustive list, so a smaller notes count than the verdict count
+is expected, not a data discrepancy:
 {feedback_summary}
 
 Now, the event to judge:
