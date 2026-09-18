@@ -47,6 +47,18 @@ from nie.pipeline.match import CONTEXT_EVENT_LIMIT, find_nearest_events
 # override it without touching the constant itself.
 FEEDBACK_WINDOW_DAYS = 30
 
+# Same "= 5" module-constant convention `MATCH_CANDIDATE_LIMIT`/
+# `CONTEXT_EVENT_LIMIT`/`ENTITY_OVERLAP_LIMIT`/`RELATE_VECTOR_LIMIT`
+# already use in this codebase. Not a `Settings`/`.env` field, same
+# "stays a module-level constant" reasoning `FEEDBACK_WINDOW_DAYS` gives
+# above -- #57's Out of scope explicitly keeps this off `Settings`.
+FEEDBACK_NOTES_PER_BUCKET = 5
+
+# Read-side prompt-rendering truncation only -- `note` itself stays an
+# unconstrained `Text` column with no write-time cap (#50); this just
+# keeps one verbose note from dominating the score-stage prompt.
+FEEDBACK_NOTE_CHAR_LIMIT = 200
+
 
 class RelatedEvent(NamedTuple):
     event: Event
@@ -63,6 +75,13 @@ class FeedbackBucket(NamedTuple):
     # (python/mypy#1021), not a real type error: the field works
     # correctly at runtime (see `tests/test_pipeline_score.py`).
     count: int  # type: ignore[assignment]
+    # This bucket's `FEEDBACK_NOTES_PER_BUCKET` most recent non-blank
+    # `Feedback.note` values (`created_at` descending), each truncated to
+    # `FEEDBACK_NOTE_CHAR_LIMIT` chars with a trailing "..." marker when
+    # truncated. Blank/null notes never appear here but still contribute
+    # to `count` above. `[]` when this bucket has zero noted rows in the
+    # feedback window -- see `_format_feedback_summary`.
+    notes: list[str]
 
 
 @dataclass(frozen=True)
@@ -114,6 +133,17 @@ async def build_context_bundle(
     linked to more than one category increments the count in each of that
     event's category buckets -- this double-counts by design, mirroring
     the event's real category membership.
+
+    Each bucket also carries up to `FEEDBACK_NOTES_PER_BUCKET` of that
+    bucket's own non-blank `note` values (#50), most recent first by
+    `created_at`, each truncated to `FEEDBACK_NOTE_CHAR_LIMIT` characters
+    (#57). This reuses the same `watch_id`/`created_at >= cutoff` filter
+    and `(category.slug, verdict)` grouping the count query above uses --
+    a feedback row on a multi-category event surfaces its note in each of
+    that event's category buckets, same double-counting-by-design as
+    `count`. A withdrawn (`#51` hard-deleted) row's note stops appearing
+    on the next call with no code change here, since this query reads
+    live table state, same as the count query above.
     """
     context_items_result = await session.execute(
         select(ContextItem)
@@ -179,11 +209,43 @@ async def build_context_bundle(
         .group_by(Category.slug, Feedback.verdict)
         .order_by(Category.slug, Feedback.verdict)
     )
+    # Same `watch_id`/`created_at >= cutoff` filter and `(category.slug,
+    # verdict)` grouping as the count query above, just over individual
+    # non-blank-noted rows instead of an aggregate -- not a separate
+    # filter surface. Ordered `created_at` descending overall, which
+    # preserves each bucket's own most-recent-first order as the loop
+    # below buckets rows by key and caps each bucket at
+    # `FEEDBACK_NOTES_PER_BUCKET`; the `Feedback.id` tie-break only
+    # matters for rows sharing one `created_at` value.
+    notes_result = await session.execute(
+        select(Category.slug, Feedback.verdict, Feedback.note)
+        .select_from(Feedback)
+        .join(EventCategory, EventCategory.event_id == Feedback.event_id)
+        .join(Category, Category.id == EventCategory.category_id)
+        .where(
+            Feedback.watch_id == watch.id,
+            Feedback.created_at >= cutoff,
+            Feedback.note.isnot(None),
+        )
+        .order_by(Feedback.created_at.desc(), Feedback.id.desc())
+    )
+    bucket_notes: dict[tuple[str, str], list[str]] = {}
+    for note_row in notes_result:
+        key = (note_row.slug, note_row.verdict)
+        notes = bucket_notes.setdefault(key, [])
+        if len(notes) < FEEDBACK_NOTES_PER_BUCKET:
+            note_text = note_row.note
+            assert note_text is not None  # excluded by `Feedback.note.isnot(None)` above
+            if len(note_text) > FEEDBACK_NOTE_CHAR_LIMIT:
+                note_text = note_text[:FEEDBACK_NOTE_CHAR_LIMIT] + "..."
+            notes.append(note_text)
+
     feedback_summary = [
         FeedbackBucket(
             category_slug=row.slug,
             verdict=row.verdict,
             count=row.count,  # type: ignore[arg-type]
+            notes=bucket_notes.get((row.slug, row.verdict), []),
         )
         for row in feedback_result
     ]
