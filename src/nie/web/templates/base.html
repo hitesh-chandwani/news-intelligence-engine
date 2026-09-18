@@ -12,6 +12,16 @@
     <script src="https://unpkg.com/htmx.org@1.9.12/dist/ext/json-enc.js"></script>
   </head>
   <body>
+    <nav class="container">
+      <ul>
+        <li><a href="/">Dashboard</a></li>
+        <li><a href="/watch">Watch</a></li>
+        <li><a href="/context">Context</a></li>
+        <li><a href="/preferences">Preferences</a></li>
+        <li><a href="/events">Events</a></li>
+        <li><a href="/notifications">Notifications</a></li>
+      </ul>
+    </nav>
     <main class="container">
       {% block content %}{% endblock %}
     </main>
