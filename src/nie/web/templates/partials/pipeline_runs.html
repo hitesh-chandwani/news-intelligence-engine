@@ -1,4 +1,4 @@
-<div id="pipeline-runs"{% if pipeline_runs | selectattr("status", "equalto", "running") | list %} hx-get="/pipeline/runs" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
+<div id="pipeline-runs"{% if pipeline_runs | selectattr("status", "equalto", "running") | list %} hx-get="/pipeline/runs" hx-trigger="every 3s [!document.hidden]" hx-swap="outerHTML"{% endif %}>
   {% if pipeline_runs %}
   <ul>
     {% for run in pipeline_runs %}
