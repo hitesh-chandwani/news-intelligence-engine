@@ -19,7 +19,7 @@ from fastapi import FastAPI
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import update
 
-from nie.db import async_session_factory
+from nie.db import async_session_factory, engine
 from nie.models import PipelineRun
 from nie.scheduler import create_scheduler
 from nie.web.routers import context, dashboard, events, notifications, pipeline, preferences, watch
@@ -59,7 +59,19 @@ async def _reconcile_orphaned_pipeline_runs() -> None:
     Out of scope (see #60): multiple concurrently-live processes/workers
     sharing one DB -- not this app's deployment model, `design.md`
     §17/§18's single Uvicorn process.
+
+    Disposes `nie.db.engine`'s pool first: it's a process-lifetime
+    singleton (module-level, built at import time), and this is the
+    first point in a real process's life it's guaranteed to be used, so
+    disposing any connection the pool may already be holding (idle from
+    an earlier checkout, or -- as in `tests/test_scheduler.py`'s
+    lifespan-driving tests, which each run in their own
+    `pytest-asyncio`-managed event loop -- bound to a now-closed loop)
+    before the very first real checkout is a harmless no-op in
+    production and keeps this startup step correct however `_lifespan`
+    ends up being invoked.
     """
+    await engine.dispose()
     async with async_session_factory() as session:
         await session.execute(
             update(PipelineRun)

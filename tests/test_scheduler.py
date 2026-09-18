@@ -28,14 +28,16 @@ business-logic coverage belongs to each stage's own test module.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from alembic.command import upgrade
 from alembic.config import Config
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import nie.scheduler as scheduler_module
@@ -54,7 +56,7 @@ from nie.pipeline.triage import TriageResult
 from nie.scheduler import scheduler_tick
 from nie.seed.run import SILVER_WATCH_SLUG, seed
 from nie.sources import extract_trafilatura
-from nie.web.app import create_app
+from nie.web.app import ORPHANED_RUN_ERROR, create_app
 from nie.web.deps import get_session
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -104,6 +106,34 @@ async def _set_watch_status(
 async def _count_pipeline_runs(session_factory: async_sessionmaker[AsyncSession]) -> int:
     async with session_factory() as session:
         result = await session.execute(select(func.count()).select_from(PipelineRun))
+        return result.scalar_one()
+
+
+async def _seed_pipeline_run(
+    session_factory: async_sessionmaker[AsyncSession],
+    status: str,
+    error: str | None = None,
+    finished_at: datetime | None = None,
+) -> uuid.UUID:
+    """Insert a `pipeline_run` row directly (bypassing `run_pipeline`) so
+    #60's tests can pre-seed a specific `status`/`error`/`finished_at`
+    combination, simulating either a row orphaned by a previous process
+    (`status="running"`) or one already in a terminal state.
+    """
+    async with session_factory() as session:
+        run = PipelineRun(
+            trigger="manual", status=status, stats={}, error=error, finished_at=finished_at
+        )
+        session.add(run)
+        await session.commit()
+        return run.id
+
+
+async def _get_pipeline_run(
+    session_factory: async_sessionmaker[AsyncSession], run_id: uuid.UUID
+) -> PipelineRun:
+    async with session_factory() as session:
+        result = await session.execute(select(PipelineRun).where(PipelineRun.id == run_id))
         return result.scalar_one()
 
 
@@ -266,3 +296,154 @@ async def test_lifespan_starts_and_stops_scheduler_cleanly(
         ) as client:
             response = await client.get("/watch/status")
         assert response.status_code in {200, 404}
+
+
+async def test_lifespan_sweeps_orphaned_running_pipeline_run_to_failed(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A `pipeline_run` row left `status="running"` by a previous process
+    (simulating an unclean exit -- `kill -9`/OOM/a crash) is swept to
+    `status="failed"` with the orphan `error` message and a `finished_at`
+    timestamp, by `_lifespan`'s startup half, before the app is otherwise
+    usable (#60).
+
+    Drives the real `lifespan` via `app.router.lifespan_context(app)` --
+    not bare `ASGITransport`, which never fires lifespan events -- per
+    #60's acceptance criteria, seeding the orphaned row *before* entering
+    the context so it's present when the startup sweep runs.
+    """
+    run_id = await _seed_pipeline_run(session_factory, status="running")
+
+    app = create_app()
+
+    async def _override_get_session() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_session] = _override_get_session
+
+    before = datetime.now(UTC)
+    async with app.router.lifespan_context(app):
+        run = await _get_pipeline_run(session_factory, run_id)
+
+    assert run.status == "failed"
+    assert run.error == ORPHANED_RUN_ERROR
+    assert run.finished_at is not None
+    assert run.finished_at >= before
+
+
+async def test_lifespan_sweep_leaves_terminal_status_rows_untouched(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The sweep's `WHERE status = 'running'` guard leaves a row already
+    in a terminal status (here `"ok"`) completely unchanged -- status,
+    `error`, and `finished_at` all identical before and after.
+    """
+    original_finished_at = datetime(2020, 1, 1, tzinfo=UTC)
+    run_id = await _seed_pipeline_run(
+        session_factory, status="ok", error=None, finished_at=original_finished_at
+    )
+
+    app = create_app()
+
+    async def _override_get_session() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_session] = _override_get_session
+
+    async with app.router.lifespan_context(app):
+        run = await _get_pipeline_run(session_factory, run_id)
+
+    assert run.status == "ok"
+    assert run.error is None
+    assert run.finished_at == original_finished_at
+
+
+async def test_lifespan_sweep_is_noop_with_zero_running_pipeline_runs(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A startup sweep against a database with zero `"running"` rows (the
+    common case -- clean shutdown, or first-ever startup) changes nothing
+    and raises nothing; `_lifespan` proceeds to start the scheduler
+    normally (implicitly exercised by every other lifespan test passing).
+
+    First force any `"running"` row left over by a prior/interrupted test
+    run against this shared, never-truncated test DB to a terminal status,
+    so this test starts from a known "zero running rows" baseline rather
+    than assuming one.
+    """
+    async with session_factory() as session:
+        await session.execute(
+            update(PipelineRun)
+            .where(PipelineRun.status == "running")
+            .values(
+                status="failed",
+                error="test setup: pre-existing stale running row",
+                finished_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+
+    before_count = await _count_pipeline_runs(session_factory)
+
+    app = create_app()
+
+    async def _override_get_session() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_session] = _override_get_session
+
+    async with app.router.lifespan_context(app):
+        async with session_factory() as session:
+            running_count = await session.execute(
+                select(func.count()).select_from(PipelineRun).where(PipelineRun.status == "running")
+            )
+            assert running_count.scalar_one() == 0
+
+    after_count = await _count_pipeline_runs(session_factory)
+    assert after_count == before_count
+
+
+async def test_lifespan_sweep_does_not_touch_a_run_started_after_the_sweep(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A `"running"` row that belongs to *this* process (e.g. created
+    after the one-time startup sweep already ran -- the scheduler's first
+    tick firing, or a manually-triggered run) is never touched by the
+    sweep: true by construction, since the sweep only runs once, before
+    `scheduler.start()` and before any request can be served, but #60's
+    acceptance criteria call for verifying it directly.
+    """
+    app = create_app()
+
+    async def _override_get_session() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_session] = _override_get_session
+
+    run_id = None
+    try:
+        async with app.router.lifespan_context(app):
+            # Simulates a real in-process run starting *after* the
+            # startup sweep already completed.
+            run_id = await _seed_pipeline_run(session_factory, status="running")
+            run = await _get_pipeline_run(session_factory, run_id)
+            assert run.status == "running"
+    finally:
+        # Don't leak a permanently-"running" row into this shared,
+        # never-truncated test DB -- it would otherwise show up as a
+        # false orphan on the very next real/test process startup.
+        if run_id is not None:
+            async with session_factory() as session:
+                await session.execute(
+                    update(PipelineRun)
+                    .where(PipelineRun.id == run_id)
+                    .values(
+                        status="ok",
+                        finished_at=datetime.now(UTC),
+                    )
+                )
+                await session.commit()
