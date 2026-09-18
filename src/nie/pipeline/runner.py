@@ -132,8 +132,8 @@ async def run_pipeline(
             await session.commit()
             run_id = run.id
         else:
-            result = await session.execute(select(PipelineRun).where(PipelineRun.id == run_id))
-            run = result.scalar_one()
+            existing = await session.execute(select(PipelineRun).where(PipelineRun.id == run_id))
+            run = existing.scalar_one()
 
         failure_count = 0
         for stage_name, stage_fn in stages:
