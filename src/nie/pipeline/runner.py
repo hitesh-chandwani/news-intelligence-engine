@@ -20,7 +20,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nie.db import async_session_factory
@@ -72,14 +72,22 @@ async def run_pipeline(
     session_factory: async_sessionmaker[AsyncSession] = async_session_factory,
     trigger: str = "manual",
     stages: Sequence[tuple[str, StageFn]] = STAGE_REGISTRY,
+    run_id: uuid.UUID | None = None,
 ) -> uuid.UUID:
     """Run every stage in `stages`, in order, against one shared session.
 
     Opens exactly one `AsyncSession` for the whole run (not one per
-    stage) and inserts a `PipelineRun(trigger=trigger, status="running",
-    stats={})` row, committing it before any stage runs -- an error here
-    propagates rather than being swallowed, since there's no row yet to
-    mark `failed`.
+    stage). When `run_id` is `None` (every existing caller --
+    `scheduler_tick`, and every pre-#54 test) this inserts its own
+    `PipelineRun(trigger=trigger, status="running", stats={})` row,
+    committing it before any stage runs -- an error here propagates
+    rather than being swallowed, since there's no row yet to mark
+    `failed`. When `run_id` is supplied (#54's `POST /pipeline/run`,
+    which inserts the row itself synchronously in the request handler
+    before spawning this coroutine as a background task -- see
+    `src/nie/web/routers/pipeline.py`'s `trigger_pipeline_run`), the
+    insert is skipped entirely and the stage loop below runs directly
+    against the already-`"running"` row identified by `run_id`.
 
     Each stage is then invoked with that same session. On success, its
     returned dict is written to `stats[stage_name]` and committed before
@@ -118,10 +126,14 @@ async def run_pipeline(
     would not be detected as a change and would be silently lost.
     """
     async with session_factory() as session:
-        run = PipelineRun(trigger=trigger, status="running", stats={})
-        session.add(run)
-        await session.commit()
-        run_id: uuid.UUID = run.id
+        if run_id is None:
+            run = PipelineRun(trigger=trigger, status="running", stats={})
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+        else:
+            result = await session.execute(select(PipelineRun).where(PipelineRun.id == run_id))
+            run = result.scalar_one()
 
         failure_count = 0
         for stage_name, stage_fn in stages:
