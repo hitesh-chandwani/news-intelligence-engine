@@ -1070,9 +1070,10 @@ async def test_hx_request_list_returns_fragment_with_polling_attributes_when_a_r
     text/html`, the re-rendered `partials/pipeline_runs.html` fragment
     (not the JSON array) -- and, since a rendered row has `status ==
     "running"`, the outer `#pipeline-runs` div carries all three polling
-    attributes (`hx-get="/pipeline/runs"`, `hx-trigger="every 3s"`,
-    `hx-swap="outerHTML"`), same shape #62's trigger-success fragment
-    already has, just reached via a plain `GET` instead of `POST
+    attributes (`hx-get="/pipeline/runs"`,
+    `hx-trigger="every 3s [!document.hidden]"` (#64's tab-visibility
+    filter), `hx-swap="outerHTML"`), same shape #62's trigger-success
+    fragment already has, just reached via a plain `GET` instead of `POST
     /pipeline/run`.
     """
     await _clear_running_pipeline_runs(session_factory)
@@ -1086,7 +1087,7 @@ async def test_hx_request_list_returns_fragment_with_polling_attributes_when_a_r
         assert response.headers["content-type"].startswith("text/html")
         assert (
             '<div id="pipeline-runs" hx-get="/pipeline/runs" '
-            'hx-trigger="every 3s" hx-swap="outerHTML">' in response.text
+            'hx-trigger="every 3s [!document.hidden]" hx-swap="outerHTML">' in response.text
         )
         assert f'hx-post="/pipeline/runs/{run_id}/cancel"' in response.text
         assert "Status: <strong>running</strong>" in response.text
@@ -1177,7 +1178,7 @@ async def test_hx_request_list_poll_reflects_current_db_state_across_transition(
         first_poll = await client.get("/pipeline/runs", headers={"HX-Request": "true"})
         assert first_poll.status_code == 200
         assert "Status: <strong>running</strong>" in first_poll.text
-        assert 'hx-trigger="every 3s"' in first_poll.text
+        assert 'hx-trigger="every 3s [!document.hidden]"' in first_poll.text
 
         async with session_factory() as session:
             await session.execute(
@@ -1211,7 +1212,7 @@ async def test_two_running_rows_keep_polling_attributes_until_both_reach_termina
 
     async with _make_client(session_factory) as client:
         both_running = await client.get("/pipeline/runs", headers={"HX-Request": "true"})
-        assert 'hx-trigger="every 3s"' in both_running.text
+        assert 'hx-trigger="every 3s [!document.hidden]"' in both_running.text
 
         async with session_factory() as session:
             await session.execute(
@@ -1224,7 +1225,7 @@ async def test_two_running_rows_keep_polling_attributes_until_both_reach_termina
         one_still_running = await client.get(
             "/pipeline/runs", headers={"HX-Request": "true"}
         )
-        assert 'hx-trigger="every 3s"' in one_still_running.text
+        assert 'hx-trigger="every 3s [!document.hidden]"' in one_still_running.text
 
         async with session_factory() as session:
             await session.execute(
