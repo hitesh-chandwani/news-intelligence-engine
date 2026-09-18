@@ -72,7 +72,7 @@ import pytest
 from alembic.command import upgrade
 from alembic.config import Config
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nie.db import create_engine, create_session_factory
@@ -999,3 +999,234 @@ async def test_non_htmx_cancel_responses_unchanged_by_hx_request_branch(
         assert missing_response.status_code == 404
         assert missing_response.headers["content-type"].startswith("application/json")
         assert set(missing_response.json().keys()) == {"detail"}
+
+
+# --- #63: auto-refresh the dashboard's pipeline-runs section ---------------
+#
+# `_render_pipeline_runs_fragment` caps its query at `_RECENT_RUNS_LIMIT`
+# (5) most-recent rows (`started_at desc`), and this test DB is shared and
+# never truncated across runs. A row inserted `status="running"` by an
+# earlier test in this module or `test_web_dashboard.py` that never reaches
+# a terminal status (e.g. `test_running_pipeline_run_shows_cancel_button`)
+# would otherwise leak into these tests' "top 5" and make "no row is
+# running" assertions flaky depending on run history/order. `_clear_
+# running_pipeline_runs` forces a known "nothing running" baseline first --
+# the same convention `tests/test_scheduler.py`'s `test_lifespan_sweep_is_
+# noop_with_zero_running_pipeline_runs` already uses for the identical
+# problem.
+
+
+async def _clear_running_pipeline_runs(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Force every `status="running"` `pipeline_run` row to a terminal
+    status, so a #63 polling-attribute test starts from a known baseline
+    rather than assuming this shared DB has none already.
+    """
+    async with session_factory() as session:
+        await session.execute(
+            update(PipelineRun)
+            .where(PipelineRun.status == "running")
+            .values(
+                status="failed",
+                error="test setup: pre-existing stale running row (#63 baseline)",
+                finished_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+
+
+async def _finish_pipeline_run(
+    session_factory: async_sessionmaker[AsyncSession], run_id: uuid.UUID
+) -> None:
+    """Force one specific row to a terminal status -- cleanup for a test
+    that inserts its own `"running"` row directly (never through `POST
+    /pipeline/run`, so nothing else will ever terminate it) so it doesn't
+    leak into a later test's "top 5" as a permanent false orphan, same
+    `finally`-cleanup convention `tests/test_scheduler.py`'s `test_
+    lifespan_sweep_does_not_touch_a_run_started_after_the_sweep` uses.
+    """
+    async with session_factory() as session:
+        await session.execute(
+            update(PipelineRun)
+            .where(PipelineRun.id == run_id)
+            .values(status="ok", finished_at=datetime.now(UTC))
+        )
+        await session.commit()
+
+
+async def test_hx_request_list_returns_fragment_with_polling_attributes_when_a_row_is_running(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#63: `GET /pipeline/runs` with `HX-Request: true` returns `200
+    text/html`, the re-rendered `partials/pipeline_runs.html` fragment
+    (not the JSON array) -- and, since a rendered row has `status ==
+    "running"`, the outer `#pipeline-runs` div carries all three polling
+    attributes (`hx-get="/pipeline/runs"`, `hx-trigger="every 3s"`,
+    `hx-swap="outerHTML"`), same shape #62's trigger-success fragment
+    already has, just reached via a plain `GET` instead of `POST
+    /pipeline/run`.
+    """
+    await _clear_running_pipeline_runs(session_factory)
+    run_id = await _insert_pipeline_run(session_factory, "running")
+
+    try:
+        async with _make_client(session_factory) as client:
+            response = await client.get("/pipeline/runs", headers={"HX-Request": "true"})
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/html")
+        assert (
+            '<div id="pipeline-runs" hx-get="/pipeline/runs" '
+            'hx-trigger="every 3s" hx-swap="outerHTML">' in response.text
+        )
+        assert f'hx-post="/pipeline/runs/{run_id}/cancel"' in response.text
+        assert "Status: <strong>running</strong>" in response.text
+    finally:
+        await _finish_pipeline_run(session_factory, run_id)
+
+
+async def test_hx_request_list_omits_polling_attributes_when_every_row_is_terminal(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#63: when every one of the (up to `_RECENT_RUNS_LIMIT`) rendered
+    rows is terminal, none of `hx-get`/`hx-trigger`/`hx-swap` are present
+    in the rendered HTML at all -- not merely pointing somewhere inert --
+    which is what actually stops htmx's polling timer
+    (`processPolling`'s `bodyContains(elt)` check never gets a chance to
+    reschedule a swapped-in element that was never given a trigger in the
+    first place).
+    """
+    await _clear_running_pipeline_runs(session_factory)
+    marker = f"terminal-marker-{uuid.uuid4()}"
+    await _insert_pipeline_run(
+        session_factory, "ok", finished_at=datetime.now(UTC), error=marker
+    )
+
+    async with _make_client(session_factory) as client:
+        response = await client.get("/pipeline/runs", headers={"HX-Request": "true"})
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    # The exact, unadorned opening tag -- proves no polling attributes
+    # were added, not just that this particular assertion string is
+    # absent.
+    assert '<div id="pipeline-runs">' in response.text
+    assert "hx-get" not in response.text
+    assert "hx-trigger" not in response.text
+    assert marker in response.text
+
+
+async def test_non_htmx_list_response_unchanged_by_hx_request_branch(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#63's new `HX-Request` branch must not alter the existing JSON
+    contract for a caller that never sends `HX-Request` (e.g. `curl`):
+    still the original bare `JSONResponse` array, `_MAX_RUNS`-capped,
+    `started_at desc` -- byte-for-byte the same shape
+    `test_trigger_run_returns_202_immediately_then_reaches_terminal_status`
+    already exercises for this same endpoint, checked here directly and
+    in isolation as this issue's own regression test.
+    """
+    run_id = await _insert_pipeline_run(session_factory, "running")
+
+    try:
+        async with _make_client(session_factory) as client:
+            response = await client.get("/pipeline/runs")
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("application/json")
+        body = response.json()
+        assert isinstance(body, list)
+        assert set(body[0].keys()) == _PIPELINE_RUN_SUMMARY_FIELDS
+        ids = [row["id"] for row in body]
+        assert str(run_id) in ids
+        started_at_values = [row["started_at"] for row in body]
+        assert started_at_values == sorted(started_at_values, reverse=True)
+    finally:
+        await _finish_pipeline_run(session_factory, run_id)
+
+
+async def test_hx_request_list_poll_reflects_current_db_state_across_transition(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#63: simulates the dashboard's own polling loop hitting `GET
+    /pipeline/runs` with `HX-Request` twice -- once while the run is
+    still `"running"` (poll response shows `status="running"` and keeps
+    the polling attributes present, per this issue's "each poll response
+    reflects current DB state" criterion) and once after the row has
+    reached a terminal status via a direct DB write standing in for
+    `run_pipeline`'s own closing write (poll response shows the terminal
+    status and the very next poll omits the polling attributes, per this
+    issue's "when the polled run reaches a terminal status" criterion) --
+    with no separate caching/staleness layer of its own, straight off
+    each request's own DB read.
+    """
+    await _clear_running_pipeline_runs(session_factory)
+    run_id = await _insert_pipeline_run(session_factory, "running")
+
+    async with _make_client(session_factory) as client:
+        first_poll = await client.get("/pipeline/runs", headers={"HX-Request": "true"})
+        assert first_poll.status_code == 200
+        assert "Status: <strong>running</strong>" in first_poll.text
+        assert 'hx-trigger="every 3s"' in first_poll.text
+
+        async with session_factory() as session:
+            await session.execute(
+                update(PipelineRun)
+                .where(PipelineRun.id == run_id)
+                .values(status="ok", finished_at=datetime.now(UTC))
+            )
+            await session.commit()
+
+        second_poll = await client.get("/pipeline/runs", headers={"HX-Request": "true"})
+
+    assert second_poll.status_code == 200
+    assert "Status: <strong>ok</strong>" in second_poll.text
+    assert "hx-trigger" not in second_poll.text
+    assert '<div id="pipeline-runs">' in second_poll.text
+
+
+async def test_two_running_rows_keep_polling_attributes_until_both_reach_terminal(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#63's edge case: with two rows both `status == "running"` at once
+    (e.g. a stale row left running from before #53/#60, plus a fresh
+    trigger), the polling attributes stay present as long as *at least
+    one* is still running -- terminalizing only one of the two must not
+    stop polling -- and only disappear once *both* have reached a
+    terminal status.
+    """
+    await _clear_running_pipeline_runs(session_factory)
+    first_id = await _insert_pipeline_run(session_factory, "running")
+    second_id = await _insert_pipeline_run(session_factory, "running")
+
+    async with _make_client(session_factory) as client:
+        both_running = await client.get("/pipeline/runs", headers={"HX-Request": "true"})
+        assert 'hx-trigger="every 3s"' in both_running.text
+
+        async with session_factory() as session:
+            await session.execute(
+                update(PipelineRun)
+                .where(PipelineRun.id == first_id)
+                .values(status="ok", finished_at=datetime.now(UTC))
+            )
+            await session.commit()
+
+        one_still_running = await client.get(
+            "/pipeline/runs", headers={"HX-Request": "true"}
+        )
+        assert 'hx-trigger="every 3s"' in one_still_running.text
+
+        async with session_factory() as session:
+            await session.execute(
+                update(PipelineRun)
+                .where(PipelineRun.id == second_id)
+                .values(status="ok", finished_at=datetime.now(UTC))
+            )
+            await session.commit()
+
+        both_terminal = await client.get("/pipeline/runs", headers={"HX-Request": "true"})
+
+    assert "hx-trigger" not in both_terminal.text
+    assert '<div id="pipeline-runs">' in both_terminal.text
