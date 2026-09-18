@@ -641,6 +641,82 @@ async def test_concurrent_trigger_returns_409(
     assert response.json() == {"detail": "a pipeline run is already in progress"}
 
 
+async def test_hx_request_trigger_success_swaps_fragment_with_new_running_row(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#62: `POST /pipeline/run` with `HX-Request: true` returns `200
+    text/html`, the re-rendered `partials/pipeline_runs.html` fragment,
+    showing the newly created row in `"running"` status with a Cancel
+    button -- the same two-way negotiation #59 gave `cancel_pipeline_run`.
+    Binds a controllable blocking stage (`_blocking_stages`) so the
+    background run is deterministically still `"running"` at response
+    time, rather than racing a real fast-finishing run.
+    """
+    stages, stage_entered, release_stage, ran = _blocking_stages()
+    _bind_run_pipeline_with_stages(monkeypatch, session_factory, stages)
+
+    async with _make_client(session_factory) as client:
+        response = await client.post("/pipeline/run", headers={"HX-Request": "true"})
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/html")
+        assert '<div id="pipeline-runs">' in response.text
+
+        async with session_factory() as session:
+            result = await session.execute(
+                select(PipelineRun).order_by(PipelineRun.started_at.desc()).limit(1)
+            )
+            newest_run = result.scalar_one()
+
+        assert newest_run.status == "running"
+        assert f'hx-post="/pipeline/runs/{newest_run.id}/cancel"' in response.text
+        assert "Status: <strong>running</strong>" in response.text
+
+        await asyncio.wait_for(stage_entered.wait(), timeout=5)
+        release_stage.set()
+        finished = await asyncio.wait_for(
+            _poll_until_terminal(client, str(newest_run.id)), timeout=10
+        )
+
+    assert finished["status"] == "ok"
+    assert ran == ["after"]
+
+
+async def test_hx_request_trigger_while_already_running_renders_fragment_not_raw_error(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#62: a second `POST /pipeline/run` with `HX-Request: true` while
+    `app.state.pipeline_lock` is already held (the `409` race) still
+    responds `200 text/html` with the re-rendered fragment -- never a
+    raw/broken error -- showing the currently-running row's real state,
+    mirroring #59's Cancel `409`/`404` HTMX handling.
+    """
+    stages, stage_entered, release_stage, ran = _blocking_stages()
+    _bind_run_pipeline_with_stages(monkeypatch, session_factory, stages)
+
+    async with _make_client(session_factory) as client:
+        first_response = await client.post("/pipeline/run")
+        assert first_response.status_code == 202
+        first_run_id = first_response.json()["id"]
+        await asyncio.wait_for(stage_entered.wait(), timeout=5)
+
+        second_response = await client.post("/pipeline/run", headers={"HX-Request": "true"})
+        assert second_response.status_code == 200
+        assert second_response.headers["content-type"].startswith("text/html")
+        assert '<div id="pipeline-runs">' in second_response.text
+        assert f'hx-post="/pipeline/runs/{first_run_id}/cancel"' in second_response.text
+        assert "Status: <strong>running</strong>" in second_response.text
+
+        release_stage.set()
+        finished = await asyncio.wait_for(
+            _poll_until_terminal(client, first_run_id), timeout=10
+        )
+
+    assert finished["status"] == "ok"
+    assert ran == ["after"]
+
+
 async def test_disabled_watch_does_not_block_trigger(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,

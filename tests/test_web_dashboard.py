@@ -361,6 +361,28 @@ async def test_terminal_pipeline_run_has_no_cancel_button(
     assert f'hx-post="/pipeline/runs/{run_id}/cancel"' not in response.text
 
 
+async def test_trigger_now_button_renders_outside_pipeline_runs_div(
+    seeded_client: AsyncClient,
+) -> None:
+    """#62: `GET /` always renders a "Trigger now" button -- a bodyless
+    `hx-post` to `/pipeline/run` targeting `#pipeline-runs` with
+    `hx-disabled-elt="this"` (no `hx-confirm`, unlike Cancel) -- and the
+    button markup appears before the `#pipeline-runs` div opens, i.e.
+    outside it, so it survives that div's `outerHTML` swap.
+    """
+    response = await seeded_client.get("/")
+
+    assert response.status_code == 200
+    assert 'hx-post="/pipeline/run"' in response.text
+    assert 'hx-target="#pipeline-runs"' in response.text
+    assert 'hx-swap="outerHTML"' in response.text
+    assert 'hx-disabled-elt="this"' in response.text
+
+    trigger_button_index = response.text.index('hx-post="/pipeline/run"')
+    pipeline_runs_div_index = response.text.index('<div id="pipeline-runs">')
+    assert trigger_button_index < pipeline_runs_div_index
+
+
 async def test_missing_silver_watch_returns_404(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
