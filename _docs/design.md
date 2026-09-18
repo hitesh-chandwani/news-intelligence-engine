@@ -392,9 +392,10 @@ uses `TrafilaturaExtractor` (local CPU, zero cost). A provider that already retu
 | `POST /events/{id}/feedback` | Submit feedback | FR-025 |
 | `DELETE /events/{id}/feedback/{feedback_id}` | Withdraw feedback | FR-025 |
 | `GET /preferences` / `PATCH /preferences` | Importance threshold + categories | FR-023, FR-024 |
-| `POST /pipeline/run` | Trigger a run now | — |
+| `POST /pipeline/run` | Trigger a run now; `202` immediately, runs in the background as a tracked `asyncio.Task` | — |
 | `GET /pipeline/runs` | Run history + stats | — |
-| `POST /pipeline/runs/{run_id}/cancel` | Cancel a running run + release the pipeline lock | — |
+| `GET /pipeline/runs/{run_id}` | One run's status/stats; poll after `POST /pipeline/run`'s `202` | — |
+| `POST /pipeline/runs/{run_id}/cancel` | Cancel a running run: release the pipeline lock and interrupt its tracked task | — |
 
 ## 13. UI pages (Jinja + HTMX)
 
