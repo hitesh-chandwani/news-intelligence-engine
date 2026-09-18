@@ -1,0 +1,33 @@
+<div id="pipeline-runs">
+  {% if pipeline_runs %}
+  <ul>
+    {% for run in pipeline_runs %}
+    <li>
+      Trigger: <strong>{{ run.trigger }}</strong>
+      &mdash;
+      Status: <strong>{{ run.status }}</strong>
+      &mdash;
+      Started: {{ run.started_at }}
+      &mdash;
+      Finished: {% if run.finished_at %}{{ run.finished_at }}{% else %}in progress{% endif %}
+      {% if run.error %}
+      &mdash;
+      Error: {{ run.error }}
+      {% endif %}
+      {% if run.status == "running" %}
+      <button
+        hx-post="/pipeline/runs/{{ run.id }}/cancel"
+        hx-target="#pipeline-runs"
+        hx-swap="outerHTML"
+        hx-confirm="Cancel this pipeline run?"
+      >
+        Cancel
+      </button>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p>No pipeline run yet.</p>
+  {% endif %}
+</div>

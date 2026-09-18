@@ -11,20 +11,8 @@
   </section>
 
   <section>
-    <h2>Last pipeline run</h2>
-    {% if last_run %}
-    <p>
-      Trigger: <strong>{{ last_run.trigger }}</strong>
-      &mdash;
-      Status: <strong>{{ last_run.status }}</strong>
-      &mdash;
-      Started: {{ last_run.started_at }}
-      &mdash;
-      Finished: {% if last_run.finished_at %}{{ last_run.finished_at }}{% else %}in progress{% endif %}
-    </p>
-    {% else %}
-    <p>No pipeline run yet.</p>
-    {% endif %}
+    <h2>Recent pipeline runs</h2>
+    {% include "partials/pipeline_runs.html" %}
   </section>
 
   <section>

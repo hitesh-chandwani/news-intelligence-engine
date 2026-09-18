@@ -1,9 +1,11 @@
 """Dashboard page (issue #49; `design.md` §12, §13).
 
 `GET /` is the app's landing page: it assembles the Silver watch's current
-status + toggle (#34), a summary of the most recent pipeline run (#34), the
+status + toggle (#34), the recent pipeline runs section (originally a
+single most-recent-run summary from #34, replaced by an up-to-5-rows
+"Recent pipeline runs" section with a Cancel button in #59), the
 most-recent events (#37), and the unread-notification count (#38) into one
-read-only page, built entirely from query logic those three issues already
+read-only page, built mostly from query logic those issues already
 shipped -- no new domain/business logic here.
 
 New file rather than an extension of `watch.py`: `GET /` aggregates four
@@ -54,6 +56,11 @@ SessionDep = Annotated[AsyncSession, Depends(get_session)]
 # (filtering is the full Timeline page, #37, linked from here).
 _RECENT_EVENTS_LIMIT = 5
 
+# `GET /`'s "Recent pipeline runs" section (#59) shows at most this many
+# rows, most-recent-first -- same small-fixed-cap, no-filter-controls
+# shape `_RECENT_EVENTS_LIMIT` already established for Recent events.
+_RECENT_RUNS_LIMIT = 5
+
 
 async def _get_silver_watch(session: AsyncSession) -> Watch:
     """Fetch the Silver `Watch` row, or FastAPI's default `404` (a JSON
@@ -70,39 +77,45 @@ async def _get_silver_watch(session: AsyncSession) -> Watch:
     return watch
 
 
-async def _most_recent_pipeline_run(session: AsyncSession) -> PipelineRunSummary | None:
-    """The most recent `pipeline_run` row (`started_at desc`), or `None`
-    if the pipeline has never run -- the same few-line query `watch.py`'s
-    `_build_status` already computes, duplicated here rather than
-    cross-imported (this module defines its own small "most recent
-    pipeline_run" query per the issue's Constraints, rather than importing
-    `watch.py`'s private `_build_status`). Not scoped to a watch --
-    `PipelineRun` (`nie.models`) has no `watch_id` (one run covers the
-    whole pipeline).
+async def _recent_pipeline_runs(session: AsyncSession) -> list[PipelineRunSummary]:
+    """The `_RECENT_RUNS_LIMIT` most recent `pipeline_run` rows
+    (`started_at desc`), or an empty list if the pipeline has never run
+    (#59; replaces the old single-row `_most_recent_pipeline_run`).
+
+    Same query `GET /pipeline/runs` (`src/nie/web/routers/pipeline.py`)
+    already runs, capped the same "reuse the query, slice/limit in
+    Python" way `_RECENT_EVENTS_LIMIT` already caps Recent events --
+    duplicated here rather than cross-imported (this module defines its
+    own small "recent pipeline_run rows" query per the issue's
+    Constraints, rather than importing `pipeline.py`'s query logic). Not
+    scoped to a watch -- `PipelineRun` (`nie.models`) has no `watch_id`
+    (one run covers the whole pipeline).
     """
     result = await session.execute(
-        select(PipelineRun).order_by(PipelineRun.started_at.desc()).limit(1)
+        select(PipelineRun).order_by(PipelineRun.started_at.desc()).limit(_RECENT_RUNS_LIMIT)
     )
-    run = result.scalar_one_or_none()
-    if run is None:
-        return None
-    return PipelineRunSummary(
-        id=run.id,
-        trigger=run.trigger,
-        status=run.status,
-        started_at=run.started_at,
-        finished_at=run.finished_at,
-        stats=run.stats,
-        error=run.error,
-    )
+    runs = result.scalars().all()
+    return [
+        PipelineRunSummary(
+            id=run.id,
+            trigger=run.trigger,
+            status=run.status,
+            started_at=run.started_at,
+            finished_at=run.finished_at,
+            stats=run.stats,
+            error=run.error,
+        )
+        for run in runs
+    ]
 
 
 @router.get("/", response_class=HTMLResponse)
 async def dashboard_page(request: Request, session: SessionDep) -> HTMLResponse:
-    """Render the dashboard: watch status + toggle, last-run summary,
-    recent events (capped at `_RECENT_EVENTS_LIMIT`), and the unread-
-    notification count, each with links to their own full page
-    (`/events`, `/notifications`, `/context`, `/preferences`).
+    """Render the dashboard: watch status + toggle, recent pipeline runs
+    (capped at `_RECENT_RUNS_LIMIT`, #59), recent events (capped at
+    `_RECENT_EVENTS_LIMIT`), and the unread-notification count, each
+    with links to their own full page (`/events`, `/notifications`,
+    `/context`, `/preferences`).
 
     Recent events reuse `events.py`'s `_list_events` with every filter
     `None` (unfiltered, `event_date desc` nulls last, tie-broken
@@ -112,9 +125,16 @@ async def dashboard_page(request: Request, session: SessionDep) -> HTMLResponse:
     `nie.notifications.inbox.list_notifications`'s existing result
     (counting `read_at is None`) -- no new query function added to
     `inbox.py`.
+
+    The pipeline-runs section is rendered via the shared
+    `partials/pipeline_runs.html` fragment (#59) -- the same fragment
+    `POST /pipeline/runs/{run_id}/cancel`'s `HX-Request` branch
+    (`pipeline.py`) re-renders after a cancel, so a running row's
+    Cancel button always swaps into an up-to-date view of this same
+    section.
     """
     watch = await _get_silver_watch(session)
-    last_run = await _most_recent_pipeline_run(session)
+    pipeline_runs = await _recent_pipeline_runs(session)
     events = (
         await _list_events(session, watch, None, None, None, None, None)
     )[:_RECENT_EVENTS_LIMIT]
@@ -127,7 +147,7 @@ async def dashboard_page(request: Request, session: SessionDep) -> HTMLResponse:
         "dashboard.html",
         {
             "watch": watch,
-            "last_run": last_run,
+            "pipeline_runs": pipeline_runs,
             "events": events,
             "unread_count": unread_count,
         },
