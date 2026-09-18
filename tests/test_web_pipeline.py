@@ -652,6 +652,10 @@ async def test_hx_request_trigger_success_swaps_fragment_with_new_running_row(
     Binds a controllable blocking stage (`_blocking_stages`) so the
     background run is deterministically still `"running"` at response
     time, rather than racing a real fast-finishing run.
+
+    Checks for `id="pipeline-runs"` (not the full, exact opening tag)
+    since #63 now also appends polling attributes to that same tag
+    whenever -- as here -- a rendered row is `"running"`.
     """
     stages, stage_entered, release_stage, ran = _blocking_stages()
     _bind_run_pipeline_with_stages(monkeypatch, session_factory, stages)
@@ -660,7 +664,7 @@ async def test_hx_request_trigger_success_swaps_fragment_with_new_running_row(
         response = await client.post("/pipeline/run", headers={"HX-Request": "true"})
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/html")
-        assert '<div id="pipeline-runs">' in response.text
+        assert 'id="pipeline-runs"' in response.text
 
         async with session_factory() as session:
             result = await session.execute(
@@ -691,6 +695,10 @@ async def test_hx_request_trigger_while_already_running_renders_fragment_not_raw
     responds `200 text/html` with the re-rendered fragment -- never a
     raw/broken error -- showing the currently-running row's real state,
     mirroring #59's Cancel `409`/`404` HTMX handling.
+
+    Checks for `id="pipeline-runs"` (not the full, exact opening tag)
+    since #63 now also appends polling attributes to that same tag
+    whenever -- as here -- a rendered row is `"running"`.
     """
     stages, stage_entered, release_stage, ran = _blocking_stages()
     _bind_run_pipeline_with_stages(monkeypatch, session_factory, stages)
@@ -704,7 +712,7 @@ async def test_hx_request_trigger_while_already_running_renders_fragment_not_raw
         second_response = await client.post("/pipeline/run", headers={"HX-Request": "true"})
         assert second_response.status_code == 200
         assert second_response.headers["content-type"].startswith("text/html")
-        assert '<div id="pipeline-runs">' in second_response.text
+        assert 'id="pipeline-runs"' in second_response.text
         assert f'hx-post="/pipeline/runs/{first_run_id}/cancel"' in second_response.text
         assert "Status: <strong>running</strong>" in second_response.text
 

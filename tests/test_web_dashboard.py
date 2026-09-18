@@ -369,6 +369,11 @@ async def test_trigger_now_button_renders_outside_pipeline_runs_div(
     `hx-disabled-elt="this"` (no `hx-confirm`, unlike Cancel) -- and the
     button markup appears before the `#pipeline-runs` div opens, i.e.
     outside it, so it survives that div's `outerHTML` swap.
+
+    Locates the div by `id="pipeline-runs"` (not the full, exact opening
+    tag) since #63 now also appends polling attributes to that same tag
+    whenever this shared test DB's most recent rows include a `"running"`
+    one.
     """
     response = await seeded_client.get("/")
 
@@ -379,7 +384,7 @@ async def test_trigger_now_button_renders_outside_pipeline_runs_div(
     assert 'hx-disabled-elt="this"' in response.text
 
     trigger_button_index = response.text.index('hx-post="/pipeline/run"')
-    pipeline_runs_div_index = response.text.index('<div id="pipeline-runs">')
+    pipeline_runs_div_index = response.text.index('id="pipeline-runs"')
     assert trigger_button_index < pipeline_runs_div_index
 
 
