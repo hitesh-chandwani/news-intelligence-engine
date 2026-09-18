@@ -806,3 +806,120 @@ async def test_cancel_unknown_run_id_returns_404(
         response = await client.post(f"/pipeline/runs/{uuid.uuid4()}/cancel")
 
     assert response.status_code == 404
+
+
+async def test_hx_request_cancel_success_swaps_fragment_to_cancelled_no_button(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#59: `POST /pipeline/runs/{run_id}/cancel` with `HX-Request: true`
+    on a `status="running"` row returns `200 text/html`, the re-rendered
+    `partials/pipeline_runs.html` fragment (`#pipeline-runs`), showing
+    the just-cancelled row's new `"cancelled"` status with its Cancel
+    button gone -- the DB write/lock-release/task-cancel behavior itself
+    is unchanged (already covered by
+    `test_cancel_running_run_returns_200_cancels_row_and_releases_lock`).
+    """
+    run_id = await _insert_pipeline_run(session_factory, "running")
+
+    async with _make_client(session_factory) as client:
+        response = await client.post(
+            f"/pipeline/runs/{run_id}/cancel", headers={"HX-Request": "true"}
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert '<div id="pipeline-runs">' in response.text
+    assert f'hx-post="/pipeline/runs/{run_id}/cancel"' not in response.text
+
+    async with session_factory() as session:
+        run = await session.get(PipelineRun, run_id)
+        assert run is not None
+        assert run.status == "cancelled"
+
+
+async def test_hx_request_cancel_terminal_run_renders_fragment_not_raw_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#59: the `409` race (the row is already terminal) still responds
+    `200 text/html` with the re-rendered fragment when `HX-Request` is
+    set -- never a raw/broken error swapped into the page -- while the
+    row itself is left completely unmodified (same invariant
+    `test_cancel_terminal_run_returns_409_and_does_not_modify_row`
+    proves for the non-HTMX JSON path).
+    """
+    finished_at = datetime.now(UTC)
+    run_id = await _insert_pipeline_run(
+        session_factory, "ok", finished_at=finished_at, error="pre-existing"
+    )
+
+    async with _make_client(session_factory) as client:
+        response = await client.post(
+            f"/pipeline/runs/{run_id}/cancel", headers={"HX-Request": "true"}
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert '<div id="pipeline-runs">' in response.text
+    assert f'hx-post="/pipeline/runs/{run_id}/cancel"' not in response.text
+
+    async with session_factory() as session:
+        run = await session.get(PipelineRun, run_id)
+        assert run is not None
+        assert run.status == "ok"
+        assert run.error == "pre-existing"
+        assert run.finished_at == finished_at
+
+
+async def test_hx_request_cancel_unknown_run_id_renders_fragment_not_raw_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#59: the `404` race (the id no longer resolves) also responds
+    `200 text/html` with the re-rendered fragment when `HX-Request` is
+    set, rather than a raw/broken error -- the fragment simply reflects
+    the DB's current up-to-5 rows, none of which is the unknown id.
+    """
+    async with _make_client(session_factory) as client:
+        response = await client.post(
+            f"/pipeline/runs/{uuid.uuid4()}/cancel", headers={"HX-Request": "true"}
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert '<div id="pipeline-runs">' in response.text
+
+
+async def test_non_htmx_cancel_responses_unchanged_by_hx_request_branch(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#59's new `HX-Request` branch must not alter the existing JSON
+    contract for a caller that never sends `HX-Request` (e.g. `curl`) --
+    success, `409`, and `404` all still return the original JSON bodies,
+    exercised together here as a direct regression check alongside the
+    pre-existing, unmodified
+    `test_cancel_running_run_returns_200_cancels_row_and_releases_lock`/
+    `test_cancel_terminal_run_returns_409_and_does_not_modify_row`/
+    `test_cancel_unknown_run_id_returns_404` (re-run verbatim, per this
+    issue's Constraints).
+    """
+    running_id = await _insert_pipeline_run(session_factory, "running")
+    terminal_id = await _insert_pipeline_run(
+        session_factory, "failed", finished_at=datetime.now(UTC), error="boom"
+    )
+
+    async with _make_client(session_factory) as client:
+        success_response = await client.post(f"/pipeline/runs/{running_id}/cancel")
+        assert success_response.status_code == 200
+        assert success_response.headers["content-type"].startswith("application/json")
+        success_body = success_response.json()
+        assert set(success_body.keys()) == _PIPELINE_RUN_SUMMARY_FIELDS
+        assert success_body["status"] == "cancelled"
+
+        conflict_response = await client.post(f"/pipeline/runs/{terminal_id}/cancel")
+        assert conflict_response.status_code == 409
+        assert conflict_response.headers["content-type"].startswith("application/json")
+        assert set(conflict_response.json().keys()) == {"detail"}
+
+        missing_response = await client.post(f"/pipeline/runs/{uuid.uuid4()}/cancel")
+        assert missing_response.status_code == 404
+        assert missing_response.headers["content-type"].startswith("application/json")
+        assert set(missing_response.json().keys()) == {"detail"}

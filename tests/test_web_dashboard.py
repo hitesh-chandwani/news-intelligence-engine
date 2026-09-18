@@ -35,7 +35,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nie.db import create_engine, create_session_factory
-from nie.models import Event, Notification, Watch
+from nie.models import Event, Notification, PipelineRun, Watch
 from nie.seed.run import SILVER_WATCH_SLUG, seed
 from nie.web.app import create_app
 from nie.web.deps import get_session
@@ -160,6 +160,27 @@ def _extract_unread_count(html: str) -> int:
     match = re.search(r'<strong id="unread-count">\s*(\d+)\s*</strong>', html)
     assert match is not None, "unread-count marker not found in rendered HTML"
     return int(match.group(1))
+
+
+async def _insert_pipeline_run(
+    session_factory: async_sessionmaker[AsyncSession], status: str, *, error: str | None = None
+) -> uuid.UUID:
+    """Insert a `pipeline_run` row directly, with a fresh `started_at`
+    (defaulted by the model) so it sorts first in `GET /`'s up-to-5
+    "Recent pipeline runs" section regardless of whatever other rows
+    this shared, never-truncated test DB already holds -- same minimal
+    direct-insert helper `test_web_pipeline.py`'s own `_insert_pipeline_
+    run` uses, duplicated here per this repo's "tests don't import each
+    other's private helpers" convention. `error` lets a test give its
+    row a unique, greppable marker in the rendered page, since the
+    fragment never prints a run's raw `id` as visible text.
+    """
+    async with session_factory() as session:
+        run = PipelineRun(trigger="manual", status=status, stats={}, error=error)
+        session.add(run)
+        await session.commit()
+        await session.refresh(run)
+        return run.id
 
 
 async def test_watch_status_and_toggle_render_enabled(
@@ -299,6 +320,45 @@ async def test_empty_state_messages_render_for_controlled_zero_case(
         assert True
     else:
         assert "<li>" in response.text
+
+
+async def test_running_pipeline_run_shows_cancel_button(
+    session_factory: async_sessionmaker[AsyncSession],
+    seeded_client: AsyncClient,
+) -> None:
+    """A `status="running"` `pipeline_run` row renders a Cancel button
+    (#59): a bodyless `hx-post` to `/pipeline/runs/{run_id}/cancel`
+    targeting `#pipeline-runs`, with `hx-confirm` set (mirroring
+    `partials/context_user_items.html`'s delete-button precedent, since
+    cancelling is irreversible).
+    """
+    run_id = await _insert_pipeline_run(session_factory, "running")
+
+    response = await seeded_client.get("/")
+
+    assert response.status_code == 200
+    assert f'hx-post="/pipeline/runs/{run_id}/cancel"' in response.text
+    assert 'hx-target="#pipeline-runs"' in response.text
+    assert "hx-confirm=" in response.text
+
+
+async def test_terminal_pipeline_run_has_no_cancel_button(
+    session_factory: async_sessionmaker[AsyncSession],
+    seeded_client: AsyncClient,
+) -> None:
+    """A terminal-status `pipeline_run` row (`"ok"` here) does not render
+    a Cancel button for that specific run -- scoped to this run's own id
+    (not "no cancel button anywhere on the page") since this shared test
+    DB may also contain other, genuinely running rows from other tests.
+    """
+    marker = f"terminal-run-marker-{uuid.uuid4()}"
+    run_id = await _insert_pipeline_run(session_factory, "ok", error=marker)
+
+    response = await seeded_client.get("/")
+
+    assert response.status_code == 200
+    assert marker in response.text
+    assert f'hx-post="/pipeline/runs/{run_id}/cancel"' not in response.text
 
 
 async def test_missing_silver_watch_returns_404(
