@@ -375,7 +375,7 @@ async def cancel_pipeline_run(
 
 
 @router.get("/pipeline/runs")
-async def list_pipeline_runs(session: SessionDep) -> JSONResponse:
+async def list_pipeline_runs(request: Request, session: SessionDep) -> Response:
     """Every `pipeline_run` row, most recent first (`started_at desc`),
     capped at `_MAX_RUNS` -- a bare JSON array (`JSONResponse(content=
     [...])`, not an object wrapper), same convention `GET /events`/
@@ -385,7 +385,25 @@ async def list_pipeline_runs(session: SessionDep) -> JSONResponse:
     A run still `status="running"` (if any -- e.g. `POST /pipeline/run`
     is mid-flight in another request) is included like any other row,
     with `finished_at`/`error` simply `None`.
+
+    **`HX-Request` negotiation (#63).** Same two-way pattern
+    `trigger_pipeline_run`/`cancel_pipeline_run` already have: when the
+    request carries `HX-Request`, this is the endpoint the dashboard's
+    own `#pipeline-runs` polling loop (`partials/pipeline_runs.html`,
+    `hx-trigger="every 3s"` while at least one row is `"running"`) hits
+    on every tick, so it responds `200 text/html` with the re-rendered
+    `partials/pipeline_runs.html` fragment (`_render_pipeline_runs_
+    fragment`, capped at `_RECENT_RUNS_LIMIT` -- the same 5 rows `GET /`
+    shows) instead of the raw JSON array -- the template itself then
+    decides, from that fresh DB read, whether to keep the polling
+    attributes (still something running) or drop them (everything now
+    terminal), which is what actually stops htmx's timer. Without
+    `HX-Request`, this endpoint is completely unchanged from before this
+    issue: the same `_MAX_RUNS`-capped `JSONResponse` array, byte-for-byte,
+    for `curl` and the existing non-HTMX tests.
     """
+    if request.headers.get("HX-Request"):
+        return await _render_pipeline_runs_fragment(request, session)
     result = await session.execute(
         select(PipelineRun).order_by(PipelineRun.started_at.desc()).limit(_MAX_RUNS)
     )
