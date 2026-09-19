@@ -39,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nie.models import PipelineRun, Watch
 from nie.notifications.inbox import list_notifications
-from nie.schemas import PipelineRunSummary
+from nie.schemas import EventSummary, PipelineRunSummary
 from nie.seed.run import SILVER_WATCH_SLUG
 from nie.web.deps import get_session
 from nie.web.routers.events import _list_events
@@ -109,6 +109,66 @@ async def _recent_pipeline_runs(session: AsyncSession) -> list[PipelineRunSummar
     ]
 
 
+async def _recent_events(session: AsyncSession, watch: Watch) -> list[EventSummary]:
+    """The `_RECENT_EVENTS_LIMIT` most recent events for `watch`
+    (`_list_events` unfiltered, sliced to the cap in Python -- the same
+    query/slice `dashboard_page` already ran), factored out here (#65) so
+    `dashboard_page` and `GET /dashboard/recent-events` share one query
+    and can never drift.
+    """
+    events = await _list_events(session, watch, None, None, None, None, None)
+    return events[:_RECENT_EVENTS_LIMIT]
+
+
+async def _unread_notification_count(session: AsyncSession, watch: Watch) -> int:
+    """Count of `watch`'s notifications with `read_at is None`, computed
+    in Python from `list_notifications`'s existing result (no new query
+    added to `inbox.py`) -- factored out here (#65) so `dashboard_page`
+    and `GET /dashboard/unread-count` share one computation and can never
+    drift.
+    """
+    notifications = await list_notifications(session, watch.id)
+    return sum(1 for notification in notifications if notification.read_at is None)
+
+
+@router.get("/dashboard/recent-events", response_class=HTMLResponse)
+async def recent_events_fragment(request: Request, session: SessionDep) -> HTMLResponse:
+    """Re-render `partials/recent_events.html` with the current
+    `_recent_events`, for the dashboard's `#recent-events` polling loop
+    (`hx-trigger="every 15s [!document.hidden]"`, #65) to hit on every
+    tick.
+
+    Fragment-only: unlike `GET /pipeline/runs` (#63), nothing calls this
+    route today outside the dashboard's own polling div, so there is no
+    pre-existing JSON/non-HTMX contract to preserve -- this always
+    returns `200 text/html`, with or without `HX-Request`.
+    """
+    watch = await _get_silver_watch(session)
+    events = await _recent_events(session, watch)
+    templates: Jinja2Templates = request.app.state.templates
+    return templates.TemplateResponse(
+        request, "partials/recent_events.html", {"events": events}
+    )
+
+
+@router.get("/dashboard/unread-count", response_class=HTMLResponse)
+async def unread_count_fragment(request: Request, session: SessionDep) -> HTMLResponse:
+    """Re-render `partials/unread_count.html` with the current
+    `_unread_notification_count`, for the dashboard's `#unread-count`
+    polling loop (`hx-trigger="every 15s [!document.hidden]"`, #65) to
+    hit on every tick.
+
+    Fragment-only, same as `recent_events_fragment` above: always
+    `200 text/html`, with or without `HX-Request`.
+    """
+    watch = await _get_silver_watch(session)
+    unread_count = await _unread_notification_count(session, watch)
+    templates: Jinja2Templates = request.app.state.templates
+    return templates.TemplateResponse(
+        request, "partials/unread_count.html", {"unread_count": unread_count}
+    )
+
+
 @router.get("/", response_class=HTMLResponse)
 async def dashboard_page(request: Request, session: SessionDep) -> HTMLResponse:
     """Render the dashboard: watch status + toggle, recent pipeline runs
@@ -117,29 +177,26 @@ async def dashboard_page(request: Request, session: SessionDep) -> HTMLResponse:
     with links to their own full page (`/events`, `/notifications`,
     `/context`, `/preferences`).
 
-    Recent events reuse `events.py`'s `_list_events` with every filter
-    `None` (unfiltered, `event_date desc` nulls last, tie-broken
-    `discovered_at desc` -- the ordering `events.py` already established),
-    then sliced to the small display cap in Python, per the issue's
-    Constraints. The unread count is computed in Python from
-    `nie.notifications.inbox.list_notifications`'s existing result
-    (counting `read_at is None`) -- no new query function added to
-    `inbox.py`.
+    Recent events and the unread count are computed via `_recent_events`/
+    `_unread_notification_count` above (#65) -- the same shared helpers
+    `GET /dashboard/recent-events`/`GET /dashboard/unread-count` call on
+    every poll tick, so this page's initial render and every subsequent
+    poll are always the same query/shape.
 
     The pipeline-runs section is rendered via the shared
     `partials/pipeline_runs.html` fragment (#59) -- the same fragment
     `POST /pipeline/runs/{run_id}/cancel`'s `HX-Request` branch
     (`pipeline.py`) re-renders after a cancel, so a running row's
     Cancel button always swaps into an up-to-date view of this same
-    section.
+    section. The recent-events and unread-count sections are likewise
+    rendered via `partials/recent_events.html`/`partials/unread_count.html`
+    (#65), each wrapped in its own always-on `hx-trigger="every 15s
+    [!document.hidden]"` polling div/`<strong>`.
     """
     watch = await _get_silver_watch(session)
     pipeline_runs = await _recent_pipeline_runs(session)
-    events = (
-        await _list_events(session, watch, None, None, None, None, None)
-    )[:_RECENT_EVENTS_LIMIT]
-    notifications = await list_notifications(session, watch.id)
-    unread_count = sum(1 for notification in notifications if notification.read_at is None)
+    events = await _recent_events(session, watch)
+    unread_count = await _unread_notification_count(session, watch)
 
     templates: Jinja2Templates = request.app.state.templates
     return templates.TemplateResponse(

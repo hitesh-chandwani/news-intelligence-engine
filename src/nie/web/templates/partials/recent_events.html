@@ -1,0 +1,15 @@
+<div id="recent-events" hx-get="/dashboard/recent-events" hx-trigger="every 15s [!document.hidden]" hx-swap="outerHTML">
+  {% if events %}
+  <ul>
+    {% for event in events %}
+    <li>
+      <a href="/events/{{ event.id }}">{{ event.title }}</a>
+      &mdash;
+      {% if event.event_date %}{{ event.event_date }}{% else %}Date unknown{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p>No events yet.</p>
+  {% endif %}
+</div>

@@ -383,6 +383,8 @@ uses `TrafilaturaExtractor` (local CPU, zero cost). A provider that already retu
 | Method + path | Purpose | FRs |
 |---|---|---|
 | `GET /` | Dashboard: watch status, recent events, unread notifications | — |
+| `GET /dashboard/recent-events` | Dashboard fragment: recent-events list (15s poll while visible) | — |
+| `GET /dashboard/unread-count` | Dashboard fragment: unread-notification count (15s poll while visible) | — |
 | `POST /watch/enable` / `POST /watch/disable` | Toggle monitoring | FR-002 |
 | `GET /watch/status` | Current status + last run summary | FR-002 |
 | `GET /context` / `POST /context` / `PATCH /context/{id}` / `DELETE /context/{id}` | User context CRUD | FR-004, FR-005 |

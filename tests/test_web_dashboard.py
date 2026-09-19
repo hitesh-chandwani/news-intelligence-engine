@@ -155,9 +155,16 @@ async def _make_notification(
 
 
 def _extract_unread_count(html: str) -> int:
-    """Pull the integer out of `dashboard.html`'s
-    `<strong id="unread-count">...</strong>` marker."""
-    match = re.search(r'<strong id="unread-count">\s*(\d+)\s*</strong>', html)
+    """Pull the integer out of `partials/unread_count.html`'s
+    `<strong id="unread-count" ...>...</strong>` marker.
+
+    Matches `id="unread-count"` followed by any other attributes (not
+    just an immediate `>`) -- a containment check, not an exact-literal
+    match, since #65 added `hx-get`/`hx-trigger`/`hx-swap` polling
+    attributes to this tag (same fix #63 made to its own pre-existing
+    `#pipeline-runs` assertions).
+    """
+    match = re.search(r'<strong id="unread-count"[^>]*>\s*(\d+)\s*</strong>', html)
     assert match is not None, "unread-count marker not found in rendered HTML"
     return int(match.group(1))
 
@@ -289,6 +296,140 @@ async def test_directly_marked_read_notification_excluded_from_unread_count(
     after_count = _extract_unread_count(after_response.text)
 
     assert after_count == before_count
+
+
+async def test_dashboard_page_embeds_recent_events_polling_div(
+    seeded_client: AsyncClient,
+) -> None:
+    """`GET /` embeds `partials/recent_events.html` (#65): the
+    `<h2>Recent events</h2>` heading and the "View all events" link stay
+    in `dashboard.html`, while the `<ul>`/empty-state markup lives in a
+    `<div id="recent-events" hx-get="/dashboard/recent-events"
+    hx-trigger="every 15s [!document.hidden]" hx-swap="outerHTML">`
+    wrapper -- unconditional (no running/terminal gate, unlike
+    `#pipeline-runs`), so these attributes are always present.
+    """
+    response = await seeded_client.get("/")
+
+    assert response.status_code == 200
+    assert "<h2>Recent events</h2>" in response.text
+    assert 'hx-get="/dashboard/recent-events"' in response.text
+    assert 'hx-trigger="every 15s [!document.hidden]"' in response.text
+    assert 'id="recent-events"' in response.text
+
+    # Same before/after split #63's own trigger-button test asserts for
+    # `#pipeline-runs`: the heading precedes the polled div, and the
+    # "View all events" link comes after it (survives the div's own
+    # `outerHTML` swap).
+    heading_index = response.text.index("<h2>Recent events</h2>")
+    div_index = response.text.index('id="recent-events"')
+    link_index = response.text.index('<a href="/events">View all events</a>')
+    assert heading_index < div_index < link_index
+
+
+async def test_dashboard_page_embeds_unread_count_polling_strong(
+    seeded_client: AsyncClient,
+) -> None:
+    """`GET /` embeds `partials/unread_count.html` (#65): the
+    `<strong id="unread-count">` marker now also carries the same
+    always-on 15s polling attributes.
+    """
+    response = await seeded_client.get("/")
+
+    assert response.status_code == 200
+    assert 'id="unread-count"' in response.text
+    assert 'hx-get="/dashboard/unread-count"' in response.text
+    assert 'hx-trigger="every 15s [!document.hidden]"' in response.text
+    assert 'hx-swap="outerHTML"' in response.text
+    assert _extract_unread_count(response.text) >= 0
+
+
+async def test_recent_events_fragment_route_renders_polling_div(
+    seeded_client: AsyncClient,
+) -> None:
+    """`GET /dashboard/recent-events` (#65) renders
+    `partials/recent_events.html` standalone: `200 text/html` (no
+    `HX-Request` header sent here -- these are fragment-only routes with
+    no separate non-HTMX contract to preserve), containing the same
+    `#recent-events` polling div the dashboard embeds.
+    """
+    response = await seeded_client.get("/dashboard/recent-events")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert 'id="recent-events"' in response.text
+    assert 'hx-get="/dashboard/recent-events"' in response.text
+    assert 'hx-trigger="every 15s [!document.hidden]"' in response.text
+    assert 'hx-swap="outerHTML"' in response.text
+
+
+async def test_recent_events_fragment_contains_freshly_created_event(
+    session_factory: async_sessionmaker[AsyncSession],
+    silver_watch_id: uuid.UUID,
+    seeded_client: AsyncClient,
+) -> None:
+    """A freshly created event (unique title) appears in the
+    `GET /dashboard/recent-events` fragment directly, the same query/cap
+    `GET /`'s own recent-events section uses (`_recent_events`, shared
+    between the two so they never drift).
+    """
+    title = _unique_title("Fragment recent event")
+    async with session_factory() as session:
+        event = await _make_event(session, silver_watch_id, title=title)
+        await session.commit()
+        event_id = event.id
+
+    response = await seeded_client.get("/dashboard/recent-events")
+
+    assert response.status_code == 200
+    assert title in response.text
+    assert f"/events/{event_id}" in response.text
+
+
+async def test_unread_count_fragment_route_renders_polling_strong(
+    seeded_client: AsyncClient,
+) -> None:
+    """`GET /dashboard/unread-count` (#65) renders
+    `partials/unread_count.html` standalone: `200 text/html`, the same
+    `#unread-count` polling `<strong>` the dashboard embeds, with a
+    well-formed non-negative integer body.
+    """
+    response = await seeded_client.get("/dashboard/unread-count")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert 'id="unread-count"' in response.text
+    assert 'hx-get="/dashboard/unread-count"' in response.text
+    assert 'hx-trigger="every 15s [!document.hidden]"' in response.text
+    assert 'hx-swap="outerHTML"' in response.text
+    assert _extract_unread_count(response.text) >= 0
+
+
+async def test_unread_count_fragment_reflects_delta_after_creating_notification(
+    session_factory: async_sessionmaker[AsyncSession],
+    silver_watch_id: uuid.UUID,
+    seeded_client: AsyncClient,
+) -> None:
+    """Creating a new unread notification increases the count rendered by
+    `GET /dashboard/unread-count` directly, by exactly one -- a delta
+    assertion against this shared, never-truncated test DB, same
+    discipline the `GET /`-level unread-count test above uses.
+    """
+    before_response = await seeded_client.get("/dashboard/unread-count")
+    assert before_response.status_code == 200
+    before_count = _extract_unread_count(before_response.text)
+
+    title = _unique_title("Fragment unread delta")
+    async with session_factory() as session:
+        event = await _make_event(session, silver_watch_id, title=title)
+        await _make_notification(session, silver_watch_id, event.id, title=title)
+        await session.commit()
+
+    after_response = await seeded_client.get("/dashboard/unread-count")
+    assert after_response.status_code == 200
+    after_count = _extract_unread_count(after_response.text)
+
+    assert after_count == before_count + 1
 
 
 async def test_empty_state_messages_render_for_controlled_zero_case(

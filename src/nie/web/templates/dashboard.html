@@ -25,25 +25,13 @@
 
   <section>
     <h2>Recent events</h2>
-    {% if events %}
-    <ul>
-      {% for event in events %}
-      <li>
-        <a href="/events/{{ event.id }}">{{ event.title }}</a>
-        &mdash;
-        {% if event.event_date %}{{ event.event_date }}{% else %}Date unknown{% endif %}
-      </li>
-      {% endfor %}
-    </ul>
-    {% else %}
-    <p>No events yet.</p>
-    {% endif %}
+    {% include "partials/recent_events.html" %}
     <p><a href="/events">View all events</a></p>
   </section>
 
   <section>
     <h2>Notifications</h2>
-    <p>Unread: <strong id="unread-count">{{ unread_count }}</strong></p>
+    <p>Unread: {% include "partials/unread_count.html" %}</p>
     <p><a href="/notifications">View notifications</a></p>
   </section>
 {% endblock %}
