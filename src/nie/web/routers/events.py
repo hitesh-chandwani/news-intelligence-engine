@@ -365,6 +365,14 @@ async def list_events(
     docstrings for why a native HTML `<select>`/`<input type="date">`
     needs that (unlike a checkbox, neither can be omitted from a
     submission by being left at its default).
+
+    The `HX-Request` branch passes `filters` into `partials/
+    event_list.html`, same as the full-page branch, so its `#event-list`
+    polling loop (`hx-trigger="every 15s [!document.hidden]"`, #66,
+    the #63/#64/#65 pattern) can build its own re-rendered `hx-get` with
+    the currently applied filters baked into the query string -- without
+    this, the filters would only survive the first poll tick after a
+    filtered page load/submission, not every tick after that.
     """
     watch = await _get_silver_watch(session)
     importance_value = _normalize_enum_query(importance, _IMPORTANCE_VALUES, "importance")
@@ -386,7 +394,7 @@ async def list_events(
 
     if request.headers.get("HX-Request"):
         return templates.TemplateResponse(
-            request, "partials/event_list.html", {"events": events}
+            request, "partials/event_list.html", {"events": events, "filters": filters}
         )
 
     accept = request.headers.get("accept", "")

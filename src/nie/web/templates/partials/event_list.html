@@ -1,4 +1,16 @@
-<div id="event-list">
+{% set filter_pairs = [] %}
+{% for value in filters.category %}{% set _ = filter_pairs.append(("category", value)) %}{% endfor %}
+{% if filters.importance %}{% set _ = filter_pairs.append(("importance", filters.importance)) %}{% endif %}
+{% if filters.relevance %}{% set _ = filter_pairs.append(("relevance", filters.relevance)) %}{% endif %}
+{% if filters.date_from %}{% set _ = filter_pairs.append(("date_from", filters.date_from.date().isoformat())) %}{% endif %}
+{% if filters.date_to %}{% set _ = filter_pairs.append(("date_to", filters.date_to.date().isoformat())) %}{% endif %}
+<div
+  id="event-list"
+  hx-get="/events{% if filter_pairs %}?{{ filter_pairs | urlencode }}{% endif %}"
+  hx-trigger="every 15s [!document.hidden]"
+  hx-swap="outerHTML"
+  hx-sync="#event-filters:abort"
+>
   {% for event in events %}
   <article>
     <a href="/events/{{ event.id }}">

@@ -19,6 +19,8 @@ exact-count assertion, same pattern `test_web_context.py`/
 `test_web_preferences.py` already establish for their own shared tables.
 """
 
+import html
+import re
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -453,12 +455,108 @@ async def test_invalid_relevance_returns_422(seeded_client: AsyncClient) -> None
 
 async def test_list_events_hx_request_gets_html_fragment(seeded_client: AsyncClient) -> None:
     """`HX-Request: true` on `GET /events` gets back `text/html`, the
-    `partials/event_list.html` fragment.
+    `partials/event_list.html` fragment, self-contained per the
+    #63/#64/#65 polling pattern (#66): its own `hx-get`/`hx-trigger`/
+    `hx-swap`, plus `hx-sync` against the filter form's id so a
+    form-submit-vs-poll race resolves in the submission's favor.
     """
     response = await seeded_client.get("/events", headers={"HX-Request": "true"})
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
-    assert '<div id="event-list">' in response.text
+    assert 'id="event-list"' in response.text
+    assert 'hx-get="/events"' in response.text
+    assert 'hx-trigger="every 15s [!document.hidden]"' in response.text
+    assert 'hx-swap="outerHTML"' in response.text
+    assert 'hx-sync="#event-filters:abort"' in response.text
+
+
+def _extract_event_list_hx_get(text: str) -> str:
+    """Pull the (HTML-unescaped) `hx-get` URL off `#event-list`'s own
+    polling attributes, as a browser reading the DOM attribute would see
+    it -- used to replay what the *next* poll tick would actually
+    request.
+    """
+    match = re.search(r'id="event-list"[^>]*hx-get="([^"]*)"', text)
+    assert match is not None, "no hx-get attribute found on #event-list"
+    return html.unescape(match.group(1))
+
+
+async def test_event_list_poll_url_has_no_filters_when_none_applied(
+    seeded_client: AsyncClient,
+) -> None:
+    """An unfiltered `GET /events` fragment's own poll `hx-get` re-requests
+    a plain `/events`, with no stray `?` for an empty query string.
+    """
+    response = await seeded_client.get("/events", headers={"HX-Request": "true"})
+    assert response.status_code == 200
+    assert _extract_event_list_hx_get(response.text) == "/events"
+
+
+async def test_event_list_poll_url_carries_applied_filters_on_first_render(
+    seeded_client: AsyncClient,
+) -> None:
+    """A filtered `GET /events` fragment's own poll `hx-get` bakes the
+    same `category`/`importance`/`date_from` filters into its query
+    string, so the *next* tick re-requests the same filtered view rather
+    than a plain unfiltered `/events` (the AC's core "currently applied
+    filters" requirement).
+    """
+    slug = CATEGORIES[0][0]
+    response = await seeded_client.get(
+        f"/events?importance=high&category={slug}&date_from=2026-01-01",
+        headers={"HX-Request": "true"},
+    )
+    assert response.status_code == 200
+    next_url = _extract_event_list_hx_get(response.text)
+    assert next_url.startswith("/events?")
+    assert "importance=high" in next_url
+    assert f"category={slug}" in next_url
+    assert "date_from=2026-01-01" in next_url
+
+
+async def test_event_list_poll_url_carries_filters_across_repeated_ticks(
+    session_factory: async_sessionmaker[AsyncSession],
+    silver_watch_id: uuid.UUID,
+    seeded_client: AsyncClient,
+) -> None:
+    """Replays two consecutive poll ticks exactly as a browser would --
+    each request's own response `hx-get` fed straight into the next
+    request -- and checks the filtered result (and the filtered poll URL
+    itself) survive both, not just the first tick immediately after a
+    filter is applied. Regression test for the router's `HX-Request`
+    branch needing to pass `filters` into `partials/event_list.html`
+    (without it, the *second* tick's fragment silently drops back to an
+    unfiltered poll URL).
+    """
+    async with session_factory() as session:
+        high = await _make_event(
+            session,
+            silver_watch_id,
+            title=_unique_title("Poll tick high importance"),
+            importance="high",
+        )
+        low = await _make_event(
+            session,
+            silver_watch_id,
+            title=_unique_title("Poll tick low importance"),
+            importance="low",
+        )
+        await session.commit()
+        high_id, low_id = str(high.id), str(low.id)
+
+    first = await seeded_client.get("/events?importance=high", headers={"HX-Request": "true"})
+    assert first.status_code == 200
+    assert high_id in first.text
+    assert low_id not in first.text
+    first_next_url = _extract_event_list_hx_get(first.text)
+    assert "importance=high" in first_next_url
+
+    second = await seeded_client.get(first_next_url, headers={"HX-Request": "true"})
+    assert second.status_code == 200
+    assert high_id in second.text
+    assert low_id not in second.text
+    second_next_url = _extract_event_list_hx_get(second.text)
+    assert second_next_url == first_next_url
 
 
 async def test_list_events_plain_request_gets_json(seeded_client: AsyncClient) -> None:
@@ -485,6 +583,56 @@ async def test_list_events_html_accept_header_gets_full_page(seeded_client: Asyn
     assert response.headers["content-type"].startswith("text/html")
     assert "<form" in response.text
     assert 'name="importance"' in response.text
+
+
+async def test_events_page_form_and_polling_list_stay_separate_elements(
+    seeded_client: AsyncClient,
+) -> None:
+    """`events.html`'s filter `<form>` (`id="event-filters"`) and its
+    `#event-list` polling div (#66) are two separate elements: the form
+    itself carries no `hx-trigger`/poll attributes of its own (a poll
+    tick only ever swaps `#event-list`, never the form), while
+    `#event-list` carries `hx-sync="#event-filters:abort"` pointed back
+    at the form's id -- the stock-htmx wiring that resolves a
+    filter-submit-vs-poll race in the submission's favor.
+    """
+    response = await seeded_client.get(
+        "/events", headers={"Accept": "text/html,application/xhtml+xml"}
+    )
+    assert response.status_code == 200
+
+    form_match = re.search(r'<form\b[^>]*>', response.text)
+    assert form_match is not None
+    form_tag = form_match.group(0)
+    assert 'id="event-filters"' in form_tag
+    assert "hx-trigger" not in form_tag
+
+    assert 'id="event-list"' in response.text
+    assert 'hx-trigger="every 15s [!document.hidden]"' in response.text
+    assert 'hx-sync="#event-filters:abort"' in response.text
+
+    form_index = response.text.index('id="event-filters"')
+    list_index = response.text.index('id="event-list"')
+    assert form_index < list_index
+
+
+async def test_events_page_polling_list_poll_url_carries_applied_filters(
+    seeded_client: AsyncClient,
+) -> None:
+    """The full-page branch's own `#event-list` poll `hx-get` also bakes
+    in the currently applied filters (not just the `HX-Request` fragment
+    branch) -- same `filters` context both branches already build.
+    """
+    slug = CATEGORIES[0][0]
+    response = await seeded_client.get(
+        f"/events?relevance=high&category={slug}",
+        headers={"Accept": "text/html,application/xhtml+xml"},
+    )
+    assert response.status_code == 200
+    next_url = _extract_event_list_hx_get(response.text)
+    assert next_url.startswith("/events?")
+    assert "relevance=high" in next_url
+    assert f"category={slug}" in next_url
 
 
 async def test_get_event_detail_hx_request_gets_html_fragment(
