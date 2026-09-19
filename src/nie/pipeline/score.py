@@ -75,12 +75,21 @@ class FeedbackBucket(NamedTuple):
     # (python/mypy#1021), not a real type error: the field works
     # correctly at runtime (see `tests/test_pipeline_score.py`).
     count: int  # type: ignore[assignment]
-    # This bucket's `FEEDBACK_NOTES_PER_BUCKET` most recent non-blank
-    # `Feedback.note` values (`created_at` descending), each truncated to
-    # `FEEDBACK_NOTE_CHAR_LIMIT` chars with a trailing "..." marker when
-    # truncated. Blank/null notes never appear here but still contribute
-    # to `count` above. `[]` when this bucket has zero noted rows in the
-    # feedback window -- see `_format_feedback_summary`.
+    # This bucket's `FEEDBACK_NOTES_PER_BUCKET` most recent non-blank,
+    # text-distinct `Feedback.note` values (`created_at` descending), each
+    # truncated to `FEEDBACK_NOTE_CHAR_LIMIT` chars with a trailing "..."
+    # marker when truncated. "Text-distinct" (#61) means a note is skipped
+    # -- not counted toward this bucket's 5-slot cap -- if, after
+    # `.strip().casefold()` normalization of its full untruncated text, it
+    # exactly matches a note already selected for this bucket; older rows
+    # keep being scanned until 5 distinct slots are filled or the feedback
+    # window is exhausted, so 40 copies of one complaint don't crowd out a
+    # handful of genuinely distinct ones. This is exact-match-after-light-
+    # normalization only -- two notes differing in wording or punctuation
+    # (not just case/whitespace) are still distinct. Blank/null notes never
+    # appear here but still contribute to `count` above. `[]` when this
+    # bucket has zero noted rows in the feedback window -- see
+    # `_format_feedback_summary`.
     notes: list[str]
 
 
@@ -135,15 +144,31 @@ async def build_context_bundle(
     the event's real category membership.
 
     Each bucket also carries up to `FEEDBACK_NOTES_PER_BUCKET` of that
-    bucket's own non-blank `note` values (#50), most recent first by
-    `created_at`, each truncated to `FEEDBACK_NOTE_CHAR_LIMIT` characters
-    (#57). This reuses the same `watch_id`/`created_at >= cutoff` filter
-    and `(category.slug, verdict)` grouping the count query above uses --
-    a feedback row on a multi-category event surfaces its note in each of
-    that event's category buckets, same double-counting-by-design as
-    `count`. A withdrawn (`#51` hard-deleted) row's note stops appearing
+    bucket's own non-blank, text-distinct `note` values (#50), most recent
+    first by `created_at`, each truncated to `FEEDBACK_NOTE_CHAR_LIMIT`
+    characters (#57). This reuses the same `watch_id`/`created_at >= cutoff`
+    filter and `(category.slug, verdict)` grouping the count query above
+    uses -- a feedback row on a multi-category event surfaces its note in
+    each of that event's category buckets, same double-counting-by-design
+    as `count`. A withdrawn (`#51` hard-deleted) row's note stops appearing
     on the next call with no code change here, since this query reads
     live table state, same as the count query above.
+
+    Before a note counts toward a bucket's 5-slot cap, it's checked against
+    that bucket's already-selected notes: if `.strip().casefold()` of its
+    full, untruncated text exactly matches an already-selected note's own
+    `.strip().casefold()`, it's skipped (#61) -- scanning continues to
+    older rows for that bucket rather than stopping, so the bucket still
+    fills to 5 distinct notes whenever the window has that many. Dedup
+    compares the *untruncated* note text specifically so two notes that
+    happen to agree only in their first `FEEDBACK_NOTE_CHAR_LIMIT` chars
+    (or that differ only in the part truncation would cut away) aren't
+    conflated -- truncation to `FEEDBACK_NOTE_CHAR_LIMIT` chars still
+    happens after a note is selected, exactly as in #57, so dedup only
+    changes which notes are chosen, never their formatting or recency
+    order. This is exact-match-after-normalization only: notes differing
+    in wording or punctuation (not just case/surrounding whitespace) are
+    treated as distinct, never fuzzy-matched or paraphrase-detected.
     """
     context_items_result = await session.execute(
         select(ContextItem)
@@ -230,6 +255,12 @@ async def build_context_bundle(
         .order_by(Feedback.created_at.desc(), Feedback.id.desc())
     )
     bucket_notes: dict[tuple[str, str], list[str]] = {}
+    # Parallel dict tracking each bucket's already-selected notes'
+    # `.strip().casefold()` normalized text (#61), so a later, older row
+    # can be compared against every note already chosen for that bucket
+    # without re-normalizing `bucket_notes`' (already truncated, "...")
+    # values -- dedup always compares original, untruncated text.
+    bucket_seen_normalized: dict[tuple[str, str], set[str]] = {}
     for note_row in notes_result:
         note_text = note_row.note
         assert note_text is not None  # excluded by `Feedback.note.isnot(None)` above
@@ -243,10 +274,26 @@ async def build_context_bundle(
 
         key = (note_row.slug, note_row.verdict)
         notes = bucket_notes.setdefault(key, [])
-        if len(notes) < FEEDBACK_NOTES_PER_BUCKET:
-            if len(note_text) > FEEDBACK_NOTE_CHAR_LIMIT:
-                note_text = note_text[:FEEDBACK_NOTE_CHAR_LIMIT] + "..."
-            notes.append(note_text)
+        if len(notes) >= FEEDBACK_NOTES_PER_BUCKET:
+            continue
+
+        # Exact-match-after-normalization dedup (#61): compare the full,
+        # untruncated note text so a match/mismatch in characters past
+        # `FEEDBACK_NOTE_CHAR_LIMIT` (never rendered, so irrelevant to
+        # dedup) isn't what decides duplicate-ness, and so two notes
+        # identical only in their first `FEEDBACK_NOTE_CHAR_LIMIT` chars
+        # aren't wrongly treated as the same note. A duplicate is skipped
+        # -- not counted toward this bucket's cap -- and the loop moves on
+        # to the next (older) row for this bucket instead of stopping.
+        seen = bucket_seen_normalized.setdefault(key, set())
+        normalized = note_text.strip().casefold()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+
+        if len(note_text) > FEEDBACK_NOTE_CHAR_LIMIT:
+            note_text = note_text[:FEEDBACK_NOTE_CHAR_LIMIT] + "..."
+        notes.append(note_text)
 
     feedback_summary = [
         FeedbackBucket(
