@@ -28,7 +28,7 @@ tests independent of each other and of any prior run's leftover rows.
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -739,7 +739,7 @@ async def test_build_context_bundle_feedback_notes_dedup_exact_match_within_buck
         # Case/whitespace-only variants of each canonical text -- all
         # normalize to the same `.strip().casefold()` value as their
         # canonical original.
-        variants = [
+        variants: list[Callable[[str], str]] = [
             lambda s: s.upper(),
             lambda s: f"  {s}  ",
             lambda s: s.swapcase(),
