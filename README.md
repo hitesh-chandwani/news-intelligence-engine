@@ -111,3 +111,42 @@ This is the baseline any future prompt change or model-tier decision
 measurably regresses decision or match agreement here is a real signal,
 not noise; the relevance/importance numbers have more natural slack
 given the above.
+
+### CI
+
+**Decision (issue #52): this harness is not run in CI, and neither is
+anything else in this repo -- it's run manually only, per the command
+above.** Reasoning:
+
+- This repo has no CI infrastructure at all today (no `.github/workflows/`,
+  no other CI config anywhere) -- `_docs/design.md` §17's deployment
+  section describes only `docker-compose.yml` plus `uv run`/`make` tasks,
+  with no CI/CD mentioned in §17 or §18. It's a local/manual-run project
+  by design.
+- Adding CI for just this harness ahead of the main 338-test suite (which
+  also has no CI) would be backwards -- if/when this repo gets CI, the
+  fast, free, deterministic suite is the natural first target, not a
+  slow, quota-limited, non-deterministic LLM-judgment harness.
+- The harness makes real, quota-limited (sometimes paid) LLM calls. This
+  isn't hypothetical: the very first real run above hit three retired
+  model names before finding one that worked, and a prior attempt on a
+  different key hit a 20-requests/day free-tier cap that couldn't finish
+  one 36-fixture run in a day. Running this on every push would need a
+  real `LLM_API_KEY` as a CI secret, competing for the same quota the
+  live pipeline depends on (`_docs/design.md` §6: 15 RPM / 1,500 RPD).
+- "Gating" implies failing the build below a threshold, but the recorded
+  pass bar (80.6% / 100% / 55.2% / 48.3% above) is nowhere near 100% and
+  expected to vary run-to-run from ordinary LLM non-determinism -- a hard
+  `assert >= threshold` would fail builds on normal model noise, not just
+  real regressions, which is worse than a human reading the printed
+  report manually after a change.
+- This is a solo-maintainer, free-tier MVP project (`_docs/design.md`'s
+  whole framing) -- CI earns its cost once there's a team merging
+  concurrently or a release process needing an automated gate, neither of
+  which exists yet.
+
+**Revisit this decision if:** this becomes a multi-contributor project, a
+paid/high-quota LLM key becomes routinely available, or CI is added for
+the main suite first (at which point consider a *non-blocking*, e.g.
+weekly scheduled, reporting-only eval run alongside it -- not a
+build-failing gate).
