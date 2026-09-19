@@ -706,6 +706,151 @@ async def test_build_context_bundle_feedback_notes_caps_at_five_most_recent(
     ]
 
 
+async def test_build_context_bundle_feedback_notes_dedup_exact_match_within_bucket(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A bucket with 40 noted rows in the window where only 3 are
+    text-distinct after `.strip().casefold()` normalization ends up with
+    exactly those 3 notes, not 5 slots padded with repeats (#61). The 37
+    duplicate rows vary only in case and surrounding whitespace -- proving
+    normalization, not plain `==`, drives the dedup -- and are all older
+    than the 3 canonical rows, so the loop must keep scanning past every
+    duplicate to find enough distinct notes."""
+    async with session_factory() as session:
+        watch = await _make_watch(session)
+        await seed_categories(session)
+        markets_result = await session.execute(select(Category).where(Category.slug == "market"))
+        markets = markets_result.scalar_one()
+
+        event = _make_event(watch.id, embedding=ANCHOR_EMBEDDING, title="Repetitive event")
+        session.add(event)
+        await session.commit()
+        await session.refresh(event)
+
+        session.add(EventCategory(event_id=event.id, category_id=markets.id))
+        await session.commit()
+
+        now = datetime.now(UTC)
+        canonical_texts = [
+            "Too many similar stories about this event.",
+            "This alert did not match my portfolio at all.",
+            "Exactly the kind of catch i wanted, nice work.",
+        ]
+        # Case/whitespace-only variants of each canonical text -- all
+        # normalize to the same `.strip().casefold()` value as their
+        # canonical original.
+        variants = [
+            lambda s: s.upper(),
+            lambda s: f"  {s}  ",
+            lambda s: s.swapcase(),
+            lambda s: f"\t{s.upper()}\t",
+        ]
+
+        rows = [
+            # The 3 canonical rows are the most recent -- minutes 0, 1, 2.
+            Feedback(
+                watch_id=watch.id,
+                event_id=event.id,
+                verdict="useful",
+                note=text,
+                created_at=now - timedelta(minutes=index),
+            )
+            for index, text in enumerate(canonical_texts)
+        ]
+        # 37 older duplicate rows (minutes 3..39), cycling through the 3
+        # canonical texts and the 4 case/whitespace transforms.
+        for offset in range(37):
+            canonical = canonical_texts[offset % len(canonical_texts)]
+            transform = variants[offset % len(variants)]
+            rows.append(
+                Feedback(
+                    watch_id=watch.id,
+                    event_id=event.id,
+                    verdict="useful",
+                    note=transform(canonical),
+                    created_at=now - timedelta(minutes=3 + offset),
+                )
+            )
+        assert len(rows) == 40
+        session.add_all(rows)
+        await session.commit()
+
+        bundle = await build_context_bundle(session, watch, event, vector_limit=0)
+
+    assert bundle.feedback_summary == [
+        FeedbackBucket(
+            category_slug=markets.slug,
+            verdict="useful",
+            count=40,
+            notes=canonical_texts,
+        ),
+    ]
+
+
+async def test_build_context_bundle_feedback_notes_near_duplicates_stay_distinct(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Exact-match dedup (#61) is not fuzzy/semantic: two notes differing
+    only in punctuation or wording (not just case/whitespace) both survive
+    as distinct entries, even alongside a genuine case/whitespace
+    duplicate that does get skipped."""
+    async with session_factory() as session:
+        watch = await _make_watch(session)
+        await seed_categories(session)
+        markets_result = await session.execute(select(Category).where(Category.slug == "market"))
+        markets = markets_result.scalar_one()
+
+        event = _make_event(watch.id, embedding=ANCHOR_EMBEDDING, title="Near-duplicate event")
+        session.add(event)
+        await session.commit()
+        await session.refresh(event)
+
+        session.add(EventCategory(event_id=event.id, category_id=markets.id))
+        await session.commit()
+
+        now = datetime.now(UTC)
+        original = "Great catch, exactly what I wanted!"
+        case_whitespace_duplicate = f"  {original.upper()}  "
+        punctuation_variant = "Great catch, exactly what I wanted."  # "." not "!"
+        session.add_all(
+            [
+                Feedback(
+                    watch_id=watch.id,
+                    event_id=event.id,
+                    verdict="useful",
+                    note=original,
+                    created_at=now - timedelta(minutes=1),
+                ),
+                Feedback(
+                    watch_id=watch.id,
+                    event_id=event.id,
+                    verdict="useful",
+                    note=case_whitespace_duplicate,
+                    created_at=now - timedelta(minutes=2),
+                ),
+                Feedback(
+                    watch_id=watch.id,
+                    event_id=event.id,
+                    verdict="useful",
+                    note=punctuation_variant,
+                    created_at=now - timedelta(minutes=3),
+                ),
+            ]
+        )
+        await session.commit()
+
+        bundle = await build_context_bundle(session, watch, event, vector_limit=0)
+
+    assert bundle.feedback_summary == [
+        FeedbackBucket(
+            category_slug=markets.slug,
+            verdict="useful",
+            count=3,
+            notes=[original, punctuation_variant],
+        ),
+    ]
+
+
 async def test_build_context_bundle_feedback_notes_truncated_over_char_limit(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
