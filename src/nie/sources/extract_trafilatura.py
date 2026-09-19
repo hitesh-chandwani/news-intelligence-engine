@@ -15,9 +15,21 @@ from __future__ import annotations
 # treats `extract_trafilatura.trafilatura` as part of this module's public
 # interface -- tests monkeypatch `trafilatura.fetch_url` through it.
 import trafilatura as trafilatura
-from trafilatura.settings import Document
+from trafilatura.settings import Document, use_config
 
 from nie.sources.base import ExtractedContent, ExtractionError
+
+# Some publishers (e.g. mining.com) return 403 to trafilatura's default
+# user agent while serving the same page fine to a browser -- a real
+# browser UA string here fixes that without touching anything else about
+# the fetch/parse behavior.
+_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
+_config = use_config()
+_config.set("DEFAULT", "USER_AGENTS", _BROWSER_USER_AGENT)
 
 
 class TrafilaturaExtractor:
@@ -25,7 +37,7 @@ class TrafilaturaExtractor:
 
     def extract(self, url: str) -> ExtractedContent:
         try:
-            downloaded = trafilatura.fetch_url(url)
+            downloaded = trafilatura.fetch_url(url, config=_config)
         except Exception as exc:
             raise ExtractionError(f"failed to fetch {url}") from exc
 

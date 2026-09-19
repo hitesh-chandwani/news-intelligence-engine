@@ -210,7 +210,9 @@ async def test_tick_against_enabled_watch_creates_one_schedule_run(
     `status` (`ok`/`partial`/`failed`).
     """
     monkeypatch.setenv("DISCOVERY_PROVIDERS", "stub")
-    monkeypatch.setattr(extract_trafilatura.trafilatura, "fetch_url", lambda url: None)
+    monkeypatch.setattr(
+        extract_trafilatura.trafilatura, "fetch_url", lambda url, config=None: None
+    )
     monkeypatch.setattr(triage_module, "LLMClient", lambda *args, **kwargs: _StubTriageClient())
     monkeypatch.setattr(
         adjudicate_module, "LLMClient", lambda *args, **kwargs: _StubAdjudicateClient()

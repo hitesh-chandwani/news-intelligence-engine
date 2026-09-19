@@ -200,8 +200,19 @@ async def test_discover_stage_inserts_stub_fixtures_and_dedupes_on_rerun(
         assert watch_id is not None
         # Reset to a clean slate: a previous run of this same test (e.g.
         # from re-running the suite) leaves these 3 rows behind, since
-        # discover_stage never deletes sources.
-        await session.execute(delete(Source).where(Source.watch_id == watch_id))
+        # discover_stage never deletes sources. Scoped to exactly this
+        # test's 3 known stub-fixture URLs (`_EXPECTED_URLS`), not every
+        # `Source` for the watch: the "silver" watch is the same literal
+        # row a real (non-test) run of this app uses (`SILVER_WATCH_SLUG`
+        # is a fixed literal, see this module's docstring), so a real
+        # pipeline run against real RSS feeds can leave `source` rows
+        # here that are referenced by `event_source` -- a blanket delete
+        # across the whole watch would hit that FK and fail with
+        # `ForeignKeyViolationError`, which this test has no business
+        # touching.
+        await session.execute(
+            delete(Source).where(Source.watch_id == watch_id, Source.url.in_(_EXPECTED_URLS))
+        )
         await session.commit()
 
     async with session_factory() as session:

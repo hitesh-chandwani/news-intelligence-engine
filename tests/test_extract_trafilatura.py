@@ -22,7 +22,9 @@ URL = "https://example.com/silver-etf-inflows"
 
 def test_extract_returns_title_and_text_from_fixture(monkeypatch: pytest.MonkeyPatch) -> None:
     html = FIXTURE_PATH.read_text()
-    monkeypatch.setattr(extract_trafilatura.trafilatura, "fetch_url", lambda url: html)
+    monkeypatch.setattr(
+        extract_trafilatura.trafilatura, "fetch_url", lambda url, config=None: html
+    )
 
     result = TrafilaturaExtractor().extract(URL)
 
@@ -34,7 +36,9 @@ def test_extract_returns_title_and_text_from_fixture(monkeypatch: pytest.MonkeyP
 def test_extract_raises_extraction_error_naming_url_on_fetch_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(extract_trafilatura.trafilatura, "fetch_url", lambda url: None)
+    monkeypatch.setattr(
+        extract_trafilatura.trafilatura, "fetch_url", lambda url, config=None: None
+    )
 
     with pytest.raises(ExtractionError, match=URL):
         TrafilaturaExtractor().extract(URL)
@@ -46,7 +50,7 @@ def test_extract_raises_extraction_error_naming_url_on_parse_failure(
     monkeypatch.setattr(
         extract_trafilatura.trafilatura,
         "fetch_url",
-        lambda url: "<html><body></body></html>",
+        lambda url, config=None: "<html><body></body></html>",
     )
 
     with pytest.raises(ExtractionError, match=URL):

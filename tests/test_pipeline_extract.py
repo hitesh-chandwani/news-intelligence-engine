@@ -150,17 +150,19 @@ async def _clear_stale_discovered_and_extract_failed_rows(
         await session.commit()
 
 
-def _fake_fetch_url(calls: list[str]) -> Callable[[str], str | None]:
+def _fake_fetch_url(calls: list[str]) -> Callable[..., str | None]:
     """Build a `trafilatura.fetch_url` stub that records every call.
 
     Resolves `SUCCESS_URL` to real fixture HTML, `FAILURE_URL` to `None`
     (fetch failure -> `ExtractionError`), and raises `AssertionError` for
     any other URL, so a bug that calls the extractor for the wrong row
     (e.g. a provider-supplied-content row that should have been skipped)
-    fails the test loudly rather than silently.
+    fails the test loudly rather than silently. Accepts (and ignores) the
+    `config` kwarg `TrafilaturaExtractor` now passes for its browser-UA
+    fix, same as the real `trafilatura.fetch_url` signature.
     """
 
-    def fetch_url(url: str) -> str | None:
+    def fetch_url(url: str, config: object = None) -> str | None:
         calls.append(url)
         if url == SUCCESS_URL:
             return FIXTURE_HTML

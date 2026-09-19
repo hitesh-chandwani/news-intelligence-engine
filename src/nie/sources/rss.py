@@ -39,6 +39,15 @@ from nie.sources.base import CandidateItem
 
 logger = logging.getLogger(__name__)
 
+# Some publishers (e.g. mining.com) return 403 to feedparser's default
+# user agent while serving the same feed fine to a browser -- matches
+# `extract_trafilatura.py`'s `_BROWSER_USER_AGENT` fix for the same class
+# of issue on the article-fetch side.
+_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
 _TAG_RE = re.compile(r"<[^>]+>")
 
 _GOOGLE_NEWS_HOST = "news.google.com"
@@ -82,7 +91,7 @@ def _parse_feed(url: str) -> Iterable[CandidateItem]:
     break discovery for every other feed in the list.
     """
     try:
-        parsed = feedparser.parse(url)
+        parsed = feedparser.parse(url, agent=_BROWSER_USER_AGENT)
     except Exception:
         logger.warning("rss: failed to parse feed %s", url, exc_info=True)
         return

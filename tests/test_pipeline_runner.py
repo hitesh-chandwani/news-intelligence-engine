@@ -271,7 +271,9 @@ async def test_all_stages_running_end_to_end_produce_an_ok_run(
     # test only cares about the runner loop, not extraction outcomes, and
     # a failed extraction (status="extract_failed") is still a fully
     # valid, non-erroring stage result.
-    monkeypatch.setattr(extract_trafilatura.trafilatura, "fetch_url", lambda url: None)
+    monkeypatch.setattr(
+        extract_trafilatura.trafilatura, "fetch_url", lambda url, config=None: None
+    )
     # triage_stage (#24) is now real too -- stub the `LLMClient` it
     # constructs for itself (no `client` is passed through the registry)
     # so this run makes no real LLM call and needs no API key.

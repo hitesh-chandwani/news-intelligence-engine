@@ -239,7 +239,9 @@ def _stub_pipeline_stages(monkeypatch: pytest.MonkeyPatch) -> None:
     test uses, factored out since two tests in this module both need it.
     """
     monkeypatch.setenv("DISCOVERY_PROVIDERS", "stub")
-    monkeypatch.setattr(extract_trafilatura.trafilatura, "fetch_url", lambda url: None)
+    monkeypatch.setattr(
+        extract_trafilatura.trafilatura, "fetch_url", lambda url, config=None: None
+    )
     monkeypatch.setattr(triage_module, "LLMClient", lambda *args, **kwargs: _StubTriageClient())
     monkeypatch.setattr(
         adjudicate_module, "LLMClient", lambda *args, **kwargs: _StubAdjudicateClient()
